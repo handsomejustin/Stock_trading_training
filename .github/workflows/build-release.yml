@@ -1,0 +1,209 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform.name }})
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          # ── Windows ──
+          - name: windows-x86_64
+            runner: windows-latest
+            artifact: 盘感训练器-windows-x86_64
+            pyinstaller-opts: ''
+          - name: windows-arm64
+            runner: windows-11-arm
+            artifact: 盘感训练器-windows-arm64
+            pyinstaller-opts: ''
+          # ── Linux ──
+          - name: linux-x86_64
+            runner: ubuntu-latest
+            artifact: 盘感训练器-linux-x86_64
+            pyinstaller-opts: ''
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            artifact: 盘感训练器-linux-arm64
+            pyinstaller-opts: ''
+          # ── macOS ──
+          - name: macos-arm64
+            runner: macos-latest   # Apple Silicon (M1+)
+            artifact: 盘感训练器-macos-arm64
+            pyinstaller-opts: ''
+          - name: macos-x86_64
+            runner: macos-13       # Intel
+            artifact: 盘感训练器-macos-x86_64
+            pyinstaller-opts: ''
+
+    steps:
+      # ──────────────────────────────────────
+      # 1. Checkout
+      # ──────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ──────────────────────────────────────
+      # 2. Python 环境
+      # ──────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      # ──────────────────────────────────────
+      # 3. Linux 系统依赖（PyQt5 需要 X11 库）
+      # ──────────────────────────────────────
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgl1-mesa-dev \
+            libglib2.0-0 \
+            libxkbcommon0 \
+            libdbus-1-3 \
+            libxcb-xinerama0 \
+            libxcb-cursor0 \
+            libxcb-icccm4 \
+            libxcb-image0 \
+            libxcb-keysyms1 \
+            libxcb-randr0 \
+            libxcb-render-util0 \
+            libxcb-shape0 \
+            libxcb-shm0 \
+            libxcb-xfixes0 \
+            libxcb-xkb1 \
+            libxkbcommon-x11-0 \
+            xvfb
+
+      # ──────────────────────────────────────
+      # 4. 安装 Python 依赖
+      # ──────────────────────────────────────
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements.txt
+
+      # ──────────────────────────────────────
+      # 5. PyInstaller 打包
+      # ──────────────────────────────────────
+      - name: Build with PyInstaller
+        shell: bash
+        run: |
+          pyinstaller \
+            --name "盘感训练器" \
+            --noconfirm \
+            --windowed \
+            --icon logo.ico \
+            --add-data "config.yaml${{ runner.os == 'Windows' && ';' || ':' }}." \
+            --add-data "logo.ico${{ runner.os == 'Windows' && ';' || ':' }}." \
+            --hidden-import easy_tdx \
+            --hidden-import easy_tdx.MyTT \
+            --hidden-import easy_tdx.offline \
+            --hidden-import easy_tdx.offline.daily_bar \
+            --hidden-import easy_tdx.offline.paths \
+            --hidden-import easy_tdx.offline.finders \
+            --hidden-import easy_tdx.offline.block \
+            --hidden-import easy_tdx.offline.gbbq \
+            main.py
+
+      # ──────────────────────────────────────
+      # 6. 打包产物（压缩）
+      # ──────────────────────────────────────
+      - name: Package artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $distDir = "dist/盘感训练器"
+          $outFile = "${{ matrix.platform.artifact }}.zip"
+          Compress-Archive -Path $distDir -DestinationPath $outFile
+
+      - name: Package artifact (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cd dist
+          zip -r -9 "../${{ matrix.platform.artifact }}.zip" "盘感训练器.app" || \
+          zip -r -9 "../${{ matrix.platform.artifact }}.zip" "盘感训练器"
+
+      - name: Package artifact (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cd dist
+          tar czf "../${{ matrix.platform.artifact }}.tar.gz" "盘感训练器"
+
+      # ──────────────────────────────────────
+      # 7. 上传到 Actions Artifacts
+      # ──────────────────────────────────────
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform.artifact }}
+          path: |
+            *.zip
+            *.tar.gz
+          retention-days: 30
+
+  # ══════════════════════════════════════════
+  # 发布到 GitHub Release
+  # ══════════════════════════════════════════
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: List artifacts
+        run: find release-artifacts -type f | sort
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: 盘感训练器 ${{ github.ref_name }}
+          body: |
+            ## 盘感训练器 — K线推演模拟交易
+
+            ### 下载说明
+
+            | 平台 | 文件 |
+            |------|------|
+            | Windows x86_64 | `盘感训练器-windows-x86_64.zip` |
+            | Windows ARM64 | `盘感训练器-windows-arm64.zip` |
+            | Linux x86_64 | `盘感训练器-linux-x86_64.tar.gz` |
+            | Linux ARM64 | `盘感训练器-linux-arm64.tar.gz` |
+            | macOS ARM (M1/M2/M3/M4) | `盘感训练器-macos-arm64.zip` |
+            | macOS Intel | `盘感训练器-macos-x86_64.zip` |
+
+            ### 使用方法
+            1. 下载对应平台的压缩包并解压
+            2. Windows: 双击 `盘感训练器.exe`
+            3. macOS: 打开 `盘感训练器.app`（首次可能需要在系统设置中允许）
+            4. Linux: 运行 `./盘感训练器`
+            5. 首次启动后选择通达信安装目录即可开始训练
+
+            > 需要本地安装通达信客户端并提供日线数据文件。
+          files: |
+            release-artifacts/**/*.zip
+            release-artifacts/**/*.tar.gz
+          draft: false
+          prerelease: false
