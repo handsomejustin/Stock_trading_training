@@ -9,14 +9,25 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
-from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QLabel, QLineEdit, QPushButton, QSpinBox, QComboBox, QTextEdit,
-    QFileDialog, QGroupBox, QStatusBar, QCheckBox,
-    QMessageBox, QSplitter,
-)
-from PyQt5.QtCore import Qt, QDateTime
-from PyQt5.QtGui import QPalette, QColor, QFont, QIcon
+# 兼容 PyQt5（本地开发）与 PySide6（CI 多平台构建）
+try:
+    from PySide6.QtWidgets import (
+        QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
+        QLabel, QLineEdit, QPushButton, QSpinBox, QComboBox, QTextEdit,
+        QFileDialog, QGroupBox, QStatusBar, QCheckBox,
+        QMessageBox, QSplitter,
+    )
+    from PySide6.QtCore import Qt, QDateTime
+    from PySide6.QtGui import QPalette, QColor, QFont, QIcon
+except ImportError:
+    from PyQt5.QtWidgets import (
+        QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
+        QLabel, QLineEdit, QPushButton, QSpinBox, QComboBox, QTextEdit,
+        QFileDialog, QGroupBox, QStatusBar, QCheckBox,
+        QMessageBox, QSplitter,
+    )
+    from PyQt5.QtCore import Qt, QDateTime
+    from PyQt5.QtGui import QPalette, QColor, QFont, QIcon
 
 from config import load_config, save_config
 from data_loader import DataLoader
@@ -706,7 +717,7 @@ def main():
     window = MainWindow()
     window.show()
 
-    sys.exit(app.exec_())
+    sys.exit(app.exec_() if hasattr(app, 'exec_') else app.exec())
 
 
 if __name__ == "__main__":
