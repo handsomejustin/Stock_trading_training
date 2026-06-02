@@ -1,0 +1,74 @@
+# 盘感训练器 - 默认配置文件
+# 修改后重启应用生效
+
+# 通达信安装目录（留空则自动检测）
+tdx_home: ""
+
+# 默认训练天数
+training_days: 120
+
+# 副图面板数量（3-5，额外副图指标框数量）
+panel_count: 3
+
+# 各副图默认指标（按顺序对应副图1~5）
+default_sub_indicators:
+  - "MACD"
+  - "KDJ"
+  - "RSI"
+  - "CCI"
+  - "BIAS"
+
+# 默认主图叠加指标
+default_main_overlays:
+  - "MA5"
+  - "MA20"
+
+# 各指标参数配置
+indicators:
+  MACD:
+    SHORT: 12
+    LONG: 26
+    M: 9
+  KDJ:
+    N: 9
+    M1: 3
+    M2: 3
+  RSI:
+    N: 6
+  CCI:
+    N: 14
+  OBV: {}
+  CR:
+    N: 26
+  TRIX:
+    M1: 12
+    M2: 20
+  DMI:
+    M1: 14
+    M2: 6
+  BIAS:
+    L1: 6
+    L2: 12
+    L3: 24
+  WR:
+    N: 10
+    N1: 6
+  EXPMA:
+    N1: 12
+    N2: 50
+  BBI:
+    M1: 3
+    M2: 6
+    M3: 12
+    M4: 20
+  BOLL:
+    N: 20
+    P: 2
+  "捉妖大师":
+    N1: 120
+    N2: 60
+    N3: 20
+    M: 10
+  "MA30乖离":
+    P: 10
+    M: 30
