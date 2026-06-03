@@ -3,15 +3,18 @@
 
 负责从本地通达信 .day 文件加载日线数据，
 支持随机选股和随机截取指定长度的历史片段。
+加载后自动进行前复权处理（基于 gbbq 除权除息数据）。
 """
 
 import random
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from easy_tdx.offline import (
     detect_tdx_home,
     read_daily_bars,
+    read_gbbq,
     resolve_vipdoc,
 )
 
@@ -34,6 +37,7 @@ class DataLoader:
 
         self.vipdoc = None
         self.stock_list: list[dict] = []
+        self._gbbq_cache: dict | None = None  # 惰性加载
 
         if self.tdx_home and self.tdx_home.is_dir():
             # 尝试解析 vipdoc 目录
@@ -145,6 +149,7 @@ class DataLoader:
             # 转为 DataFrame
             df = pd.DataFrame([{
                 "date": f"{b.year}-{b.month:02d}-{b.day:02d}",
+                "date_int": b.year * 10000 + b.month * 100 + b.day,
                 "open": float(b.open),
                 "high": float(b.high),
                 "low": float(b.low),
@@ -154,6 +159,13 @@ class DataLoader:
 
             # 重置索引
             df = df.reset_index(drop=True)
+
+            # ---- 前复权处理 ----
+            df = self._apply_forward_adjust(df, stock["market"], stock["code"])
+
+            # 移除临时列
+            if "date_int" in df.columns:
+                df = df.drop(columns=["date_int"])
 
             code = f"{stock['market']}{stock['code']}"
             return df, code
@@ -166,3 +178,121 @@ class DataLoader:
     def get_stock_count(self) -> int:
         """获取已扫描到的股票数量。"""
         return len(self.stock_list)
+
+    # ============================================================
+    # 前复权
+    # ============================================================
+    def _load_gbbq(self) -> dict:
+        """
+        惰性加载 gbbq 除权除息数据，按 market+code 索引。
+
+        Returns:
+            dict: key = "SH600519" / "SZ000001"，value = list[GbbqRecord]
+        """
+        if self._gbbq_cache is not None:
+            return self._gbbq_cache
+
+        self._gbbq_cache = {}
+        try:
+            gbbq_path = self.tdx_home / "T0002" / "hq_cache" / "gbbq"
+            if not gbbq_path.is_file():
+                return self._gbbq_cache
+
+            records = read_gbbq(gbbq_path)
+            for r in records:
+                if r.category != 1:
+                    continue  # 仅保留除权除息记录
+                prefix = "SH" if r.market == 1 else "SZ"
+                key = f"{prefix}{r.code}"
+                if key not in self._gbbq_cache:
+                    self._gbbq_cache[key] = []
+                self._gbbq_cache[key].append(r)
+        except Exception:
+            pass  # gbbq 不可用时跳过复权
+
+        return self._gbbq_cache
+
+    def _apply_forward_adjust(self, df: pd.DataFrame,
+                              market: str, code: str) -> pd.DataFrame:
+        """
+        对 DataFrame 进行前复权处理。
+
+        前复权原理：保持最新价格不变，用累计除权因子调整历史价格。
+        每次除权除息的调整因子 = (收盘价 - 每股分红 + 配股价×每股配股)
+                                 / (收盘价 × (1 + 每股送股 + 每股配股))
+
+        Args:
+            df: 包含 date_int, open, high, low, close, volume 列的 DataFrame
+            market: "SH" 或 "SZ"
+            code: 6位股票代码
+
+        Returns:
+            pd.DataFrame: 前复权后的 DataFrame
+        """
+        gbbq = self._load_gbbq()
+        key = f"{market}{code}"
+        events = gbbq.get(key, [])
+
+        if not events:
+            return df  # 无除权记录，直接返回
+
+        # 按日期排序
+        events.sort(key=lambda r: r.datetime)
+
+        # 构建 DataFrame 的日期索引映射
+        date_ints = df["date_int"].values
+
+        # 从最新日期向回计算累计除权因子
+        # factor[i] 表示第 i 根 bar 的前复权因子
+        factors = np.ones(len(df), dtype=np.float64)
+
+        for event in events:
+            ex_date = event.datetime
+
+            # 找到除权日在 df 中的位置（除权日当天开始用新价格）
+            # np.searchsorted 找到第一个 >= ex_date 的位置
+            idx = np.searchsorted(date_ints, ex_date)
+            if idx >= len(date_ints) or date_ints[idx] != ex_date:
+                # 除权日不在当前数据范围内，跳过
+                continue
+
+            # 需要调整的是除权日之前（idx 左侧）的所有 bar
+            if idx == 0:
+                continue  # 没有更早的 bar 需要调整
+
+            # 取除权日前一天的收盘价作为基准
+            prev_close = df.iloc[idx - 1]["close"]
+
+            if prev_close <= 0:
+                continue
+
+            # gbbq 字段含义（每10股）：
+            #   hongli = 每10股派息（元）
+            #   songgu = 每10股送股（股）
+            #   peigu  = 每10股配股（股）
+            #   peigujia = 配股价（元/股）
+            dividend = event.hongli_panqianliutong / 10.0   # 每股派息
+            bonus = event.songgu_qianzongguben / 10.0       # 每股送股
+            rights = event.peigu_houzongguben / 10.0        # 每股配股
+            rights_price = event.peigujia_qianzongguben      # 配股价
+
+            # 除权因子
+            total_dilution = 1.0 + bonus + rights
+            if total_dilution == 0:
+                continue
+
+            # 调整因子 = (前收盘 - 分红 + 配股价×配股比) / (前收盘 × (1+送股比+配股比))
+            # 简化：对 OHLC 的价格乘以 1/(1+送+配)，再减去每股分红的影响
+            event_factor = (prev_close - dividend + rights_price * rights) / (prev_close * total_dilution)
+
+            if event_factor <= 0:
+                continue
+
+            # 对除权日之前的所有 bar 累乘因子
+            factors[:idx] *= event_factor
+
+        # 应用因子到 OHLC（保留2位小数精度）
+        for col in ("open", "high", "low", "close"):
+            df[col] = np.round(df[col].values * factors, 2)
+
+        return df

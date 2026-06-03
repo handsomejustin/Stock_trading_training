@@ -104,7 +104,7 @@ class ChartCanvas(FigureCanvasQTAgg):
             total, 1,
             height_ratios=height_ratios,
             hspace=0.08,
-            left=0.06, right=0.98, top=0.95, bottom=0.04,
+            left=0.03, right=0.97, top=0.96, bottom=0.03,
         )
 
         # 主图
@@ -264,28 +264,74 @@ class ChartCanvas(FigureCanvasQTAgg):
                         label=line_info["name"],
                     )
 
+        # ---- 绘制止损/止盈参考线 ----
+        if (self.trade_manager and hasattr(self.trade_manager, 'portfolio')
+                and self.trade_manager.portfolio.position > 0):
+            pf = self.trade_manager.portfolio
+            cost = pf.avg_cost
+            if cost > 0:
+                if pf.stop_loss_pct is not None and pf.stop_loss_pct < 0:
+                    sl_price = cost * (1.0 + pf.stop_loss_pct)
+                    self.ax_kline.axhline(
+                        y=sl_price, color="#ff6666", linewidth=0.6,
+                        linestyle="--", alpha=0.5, label="止损线")
+                if pf.take_profit_pct is not None and pf.take_profit_pct > 0:
+                    tp_price = cost * (1.0 + pf.take_profit_pct)
+                    self.ax_kline.axhline(
+                        y=tp_price, color="#66ff66", linewidth=0.6,
+                        linestyle="--", alpha=0.5, label="止盈线")
+
         # ---- 绘制买卖标记 ----
         if self.trade_manager:
             markers = self.trade_manager.get_trade_markers()
             for m in markers:
                 if m["idx"] < cursor:
                     x_pos = m["idx"]
+                    if x_pos >= n:
+                        continue
+                    ratio = m.get("ratio", 1.0)
+                    is_auto = m.get("is_auto", False)
+                    auto_reason = m.get("auto_reason", "")
+                    pos_after = m.get("position_after", None)
+
+                    # 字体大小随仓位比例缩放: 8pt(小仓) ~ 14pt(全仓)
+                    font_size = 8 + int(ratio * 6)
+
                     if m["action"] == "buy":
-                        self.ax_kline.annotate(
-                            "B", xy=(x_pos, vis.iloc[x_pos]["low"]),
-                            xytext=(x_pos, vis.iloc[x_pos]["low"] * 0.97),
-                            fontsize=10, fontweight="bold",
-                            color="#ff4444", ha="center", va="top",
-                            arrowprops=dict(arrowstyle="->", color="#ff4444", lw=1.5),
-                        )
-                    elif m["action"] == "sell":
-                        self.ax_kline.annotate(
-                            "S", xy=(x_pos, vis.iloc[x_pos]["high"]),
-                            xytext=(x_pos, vis.iloc[x_pos]["high"] * 1.03),
-                            fontsize=10, fontweight="bold",
-                            color="#00cc00", ha="center", va="bottom",
-                            arrowprops=dict(arrowstyle="->", color="#00cc00", lw=1.5),
-                        )
+                        label = "B"
+                        color = "#ff4444"
+                        y_anchor = vis.iloc[x_pos]["low"]
+                        y_offset = y_anchor * 0.97
+                        va = "top"
+                    else:
+                        # 自动止损/止盈用特殊标记
+                        if is_auto and auto_reason == "stop_loss":
+                            label = "SL"
+                        elif is_auto and auto_reason == "take_profit":
+                            label = "TP"
+                        else:
+                            label = "S"
+                        color = "#00cc00"
+                        y_anchor = vis.iloc[x_pos]["high"]
+                        y_offset = y_anchor * 1.03
+                        va = "bottom"
+
+                    self.ax_kline.annotate(
+                        label, xy=(x_pos, y_anchor),
+                        xytext=(x_pos, y_offset),
+                        fontsize=font_size, fontweight="bold",
+                        color=color, ha="center", va=va,
+                        arrowprops=dict(arrowstyle="->", color=color,
+                                        lw=0.8 + ratio * 0.7),
+                    )
+                    # 显示操作后仓位百分比
+                    if pos_after is not None:
+                        pos_label = f"{pos_after * 100:.0f}%"
+                        label_y = y_offset * (0.98 if m["action"] == "buy" else 1.02)
+                        self.ax_kline.text(
+                            x_pos + 0.5, label_y, pos_label,
+                            fontsize=6, color="#aaaaaa", ha="left",
+                            va=va)
 
         # ---- 绘制成交量 ----
         self._draw_volume(self.ax_volume, vis)

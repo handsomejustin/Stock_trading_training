@@ -2,7 +2,8 @@
 盘感训练器 - 训练报告生成模块
 
 训练结束时生成结构化 Markdown 报告，保存到文件。
-报告包含：基本信息、完整K线数据、技术指标、操作记录、收益总结。
+报告包含：基本信息、完整K线数据、技术指标、操作记录、
+交易评分、收益总结。支持追加 AI 分析结果。
 格式设计为 AI 可直接解析分析。
 """
 
@@ -25,7 +26,8 @@ def generate_report(
     cursor: int,
     config: dict,
     output_dir: str = None,
-) -> str:
+    ai_analysis: str = None,
+) -> tuple:
     """
     生成训练报告并保存为 Markdown 文件。
 
@@ -37,9 +39,10 @@ def generate_report(
         cursor: 训练结束时推演到的位置
         config: 配置字典
         output_dir: 输出目录，默认为项目目录
+        ai_analysis: AI 分析结果文本（可选）
 
     Returns:
-        str: 保存的文件路径
+        tuple: (report_path, report_text) 报告文件路径和完整文本
     """
     sections = []
 
@@ -58,8 +61,15 @@ def generate_report(
     # ---- 决策点指标快照 ----
     sections.append(_build_decision_snapshots(df, indicator_hub, trade_manager))
 
+    # ---- 交易评分 ----
+    sections.append(_build_trade_scoring(df, trade_manager))
+
     # ---- 收益总结 ----
     sections.append(_build_summary(df, trade_manager))
+
+    # ---- AI 复盘分析 ----
+    if ai_analysis:
+        sections.append(f"## AI 复盘分析\n\n{ai_analysis}")
 
     # 拼接完整报告
     report = "\n\n".join(sections)
@@ -67,14 +77,13 @@ def generate_report(
     # 保存到文件
     if output_dir is None:
         if getattr(sys, 'frozen', False):
-            # PyInstaller 打包后，输出到 exe 所在目录的 docs/ 子文件夹
             base = Path(sys.executable).parent
         else:
             base = Path(__file__).parent
         output_dir = str(base / "docs")
-    output_path = _save_report(report, stock_code, output_dir)
+    report_path = _save_report(report, stock_code, output_dir)
 
-    return output_path
+    return report_path, report
 
 
 def _build_header(stock_code: str, df: pd.DataFrame, cursor: int, config: dict) -> str:
@@ -120,13 +129,15 @@ def _build_trade_log(df: pd.DataFrame, trade_manager: TradeManager) -> str:
         lines.append("> 本次训练未进行任何交易。")
         return "\n".join(lines)
 
-    # 表头
-    lines.append("| # | 操作 | 日期 | 价格 | K线位置 | 当日开盘 | 当日最高 | 当日最低 | 涨跌幅 |")
-    lines.append("|---:|:----:|:----:|-----:|--------:|--------:|--------:|--------:|-------:|")
+    # 表头（含仓位信息）
+    lines.append("| # | 操作 | 日期 | 价格 | 仓位比 | 操作后仓位 | K线位置 | 当日开盘 | 当日最高 | 当日最低 | 涨跌幅 |")
+    lines.append("|---:|:----:|:----:|-----:|-------:|----------:|--------:|--------:|--------:|--------:|-------:|")
 
     prev_close = None
     for i, t in enumerate(trades):
         idx = t["idx"]
+        if idx >= len(df):
+            continue
         row = df.iloc[idx]
         # 计算当日涨跌幅
         if prev_close is not None:
@@ -137,9 +148,19 @@ def _build_trade_log(df: pd.DataFrame, trade_manager: TradeManager) -> str:
         prev_close = row["close"]
 
         action = "买入" if t["action"] == "buy" else "卖出"
-        # K线位置用从0开始的索引
+        ratio = t.get("ratio", 1.0)
+        pos_after = t.get("position_after", 1.0 if t["action"] == "buy" else 0.0)
+        is_auto = t.get("is_auto", False)
+        if is_auto:
+            reason = t.get("auto_reason", "")
+            if reason == "stop_loss":
+                action = "自动止损"
+            elif reason == "take_profit":
+                action = "自动止盈"
+
         lines.append(
             f"| {i+1} | {action} | {t['date']} | {t['price']:.2f} "
+            f"| {ratio*100:.0f}% | {pos_after*100:.0f}% "
             f"| 第{idx}根 | {row['open']:.2f} | {row['high']:.2f} "
             f"| {row['low']:.2f} | {chg_str} |"
         )
@@ -152,7 +173,7 @@ def _build_kline_table(df: pd.DataFrame, trade_manager: TradeManager) -> str:
     lines = [
         "## K线数据（完整）",
         "",
-        "标记说明: **[B]** = 买入点, **[S]** = 卖出点",
+        "标记说明: **[B]** = 买入点, **[S]** = 卖出点, **[SL]** = 自动止损, **[TP]** = 自动止盈",
         "",
         "| 序号 | 日期 | 开盘 | 最高 | 最低 | 收盘 | 成交量 | 涨跌幅 | 标记 |",
         "|-----:|:----:|-----:|-----:|-----:|-----:|-------:|-------:|:----:|",
@@ -161,8 +182,17 @@ def _build_kline_table(df: pd.DataFrame, trade_manager: TradeManager) -> str:
     # 构建标记集合
     markers = {}
     for t in trade_manager.get_trade_markers():
-        action_tag = "B" if t["action"] == "buy" else "S"
-        markers[t["idx"]] = action_tag
+        if t["action"] == "buy":
+            markers[t["idx"]] = "B"
+        else:
+            is_auto = t.get("is_auto", False)
+            reason = t.get("auto_reason", "")
+            if is_auto and reason == "stop_loss":
+                markers[t["idx"]] = "SL"
+            elif is_auto and reason == "take_profit":
+                markers[t["idx"]] = "TP"
+            else:
+                markers[t["idx"]] = "S"
 
     prev_close = None
     for i in range(len(df)):
@@ -264,12 +294,24 @@ def _build_decision_snapshots(
 
     for i, t in enumerate(trades):
         idx = t["idx"]
+        if idx >= len(df):
+            continue
         row = df.iloc[idx]
         action = "买入" if t["action"] == "buy" else "卖出"
+        is_auto = t.get("is_auto", False)
+        if is_auto:
+            reason = t.get("auto_reason", "")
+            if reason == "stop_loss":
+                action = "自动止损"
+            elif reason == "take_profit":
+                action = "自动止盈"
+        ratio = t.get("ratio", 1.0)
+        pos_after = t.get("position_after", None)
 
         lines.append(f"### 决策 {i+1}: {action} @ {t['date']} (价格 {t['price']:.2f})")
         lines.append("")
         lines.append(f"**K线数据**: O={row['open']:.2f} H={row['high']:.2f} L={row['low']:.2f} C={row['close']:.2f} V={row['volume']:.0f}")
+        lines.append(f"**仓位**: 本次{ratio*100:.0f}%, 操作后{pos_after*100:.0f}%" if pos_after is not None else "")
         lines.append("")
 
         # 展示所有指标在该点的值
@@ -301,6 +343,56 @@ def _build_decision_snapshots(
     return "\n".join(lines)
 
 
+def _build_trade_scoring(df: pd.DataFrame, trade_manager: TradeManager) -> str:
+    """生成交易评分段落。"""
+    lines = [
+        "## 交易评分",
+        "",
+        "每笔完整交易（从首次买入到清仓）的详细评分数据。",
+        "",
+    ]
+
+    completed = trade_manager.get_completed_trades()
+    if not completed:
+        lines.append("> 无完整交易记录。")
+        return "\n".join(lines)
+
+    # Buy-and-hold 基准
+    min_warmup = 30
+    if len(df) > min_warmup:
+        bh_return = (df.iloc[-1]["close"] / df.iloc[min_warmup]["close"] - 1) * 100
+    else:
+        bh_return = 0.0
+
+    lines.append(f"**持有不动基准收益**: {bh_return:+.2f}%")
+    lines.append("")
+
+    for i, ct in enumerate(completed):
+        sign = "+" if ct.return_pct >= 0 else ""
+        lines.append(f"### 交易 {i+1}")
+        lines.append("")
+        lines.append(f"- **买入均价**: {ct.buy_avg_price:.2f}")
+        lines.append(f"- **卖出均价**: {ct.sell_avg_price:.2f}")
+        lines.append(f"- **收益率**: {sign}{ct.return_pct:.2f}%")
+        lines.append(f"- **持仓天数**: {ct.hold_days} 根K线")
+        lines.append(f"- **最大浮盈**: +{ct.max_floating_profit:.2f}%")
+        lines.append(f"- **最大浮亏**: {ct.max_floating_loss:.2f}%")
+        if ct.is_auto_exit:
+            lines.append(f"- **退出方式**: 自动止损/止盈")
+        if ct.timing_score_5d != 0:
+            lines.append(
+                f"- **时机评分**: 5日{ct.timing_score_5d:+.2f}% "
+                f"10日{ct.timing_score_10d:+.2f}% "
+                f"20日{ct.timing_score_20d:+.2f}%"
+            )
+        # 与基准对比
+        diff = ct.return_pct - bh_return
+        lines.append(f"- **超越基准**: {diff:+.2f}%")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def _build_summary(df: pd.DataFrame, trade_manager: TradeManager) -> str:
     """生成训练总结。"""
     lines = [
@@ -316,26 +408,17 @@ def _build_summary(df: pd.DataFrame, trade_manager: TradeManager) -> str:
     lines.append("")
 
     # 额外统计
-    trades = trade_manager.get_trade_markers()
-    if trades:
+    completed = trade_manager.get_completed_trades()
+    if completed:
         # 持仓天数统计
-        hold_days = []
-        current_buy = None
-        for t in trades:
-            if t["action"] == "buy":
-                current_buy = t
-            elif t["action"] == "sell" and current_buy is not None:
-                hold_days.append(t["idx"] - current_buy["idx"])
-                current_buy = None
-        if current_buy is not None:
-            hold_days.append(len(df) - 1 - current_buy["idx"])
-
+        hold_days = [ct.hold_days for ct in completed]
         if hold_days:
             lines.append(f"- **平均持仓天数**: {np.mean(hold_days):.1f} 根K线")
             lines.append(f"- **最短持仓**: {min(hold_days)} 根K线")
             lines.append(f"- **最长持仓**: {max(hold_days)} 根K线")
 
         # 交易次数
+        trades = trade_manager.get_trade_markers()
         buy_count = sum(1 for t in trades if t["action"] == "buy")
         sell_count = sum(1 for t in trades if t["action"] == "sell")
         lines.append(f"- **买入次数**: {buy_count}")

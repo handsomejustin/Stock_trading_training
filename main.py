@@ -1,8 +1,8 @@
 """
 盘感训练器 - 主窗口模块
 
-整合所有模块，构建 PyQt5 主窗口。
-包含：暗色主题、左右布局、键盘/按钮事件、操作日志。
+整合所有模块，构建 PyQt5/PySide6 主窗口。
+包含：暗色主题、Tab布局、分仓快捷键、止损止盈、AI分析、统计面板。
 """
 
 import sys
@@ -15,16 +15,17 @@ try:
         QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
         QLabel, QLineEdit, QPushButton, QSpinBox, QComboBox, QTextEdit,
         QFileDialog, QGroupBox, QStatusBar, QCheckBox,
-        QMessageBox, QSplitter,
+        QMessageBox, QSplitter, QTabWidget, QDoubleSpinBox,
     )
     from PySide6.QtCore import Qt, QDateTime, QEvent
     from PySide6.QtGui import QPalette, QColor, QFont, QIcon
+    from PySide6.QtWidgets import QApplication as QApp
 except ImportError:
     from PyQt5.QtWidgets import (
         QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
         QLabel, QLineEdit, QPushButton, QSpinBox, QComboBox, QTextEdit,
         QFileDialog, QGroupBox, QStatusBar, QCheckBox,
-        QMessageBox, QSplitter,
+        QMessageBox, QSplitter, QTabWidget, QDoubleSpinBox,
     )
     from PyQt5.QtCore import Qt, QDateTime, QEvent
     from PyQt5.QtGui import QPalette, QColor, QFont, QIcon
@@ -35,6 +36,9 @@ from indicators import IndicatorHub, SUB_INDICATOR_NAMES
 from chart_canvas import ChartCanvas
 from trade_manager import TradeManager
 from report_generator import generate_report
+from db import Database
+from ai_analyzer import AIAnalyzer
+from stats_panel import StatsPanel
 
 
 class MainWindow(QMainWindow):
@@ -64,11 +68,19 @@ class MainWindow(QMainWindow):
         self.training_active = False
         self.min_warmup = 30        # 指标预热最小根数
 
+        # ---- 数据库 & AI ----
+        self.db = Database()
+        self.ai_analyzer = AIAnalyzer(self.config)
+
+        # ---- 默认仓位 ----
+        trading_cfg = self.config.get("trading", {})
+        self.default_buy_ratio = trading_cfg.get("default_buy_ratio", 1.0)
+        self.default_sell_ratio = trading_cfg.get("default_sell_ratio", 1.0)
+
         # ---- 构建 UI ----
         self._build_ui()
 
         # ---- 安装全局事件过滤器 ----
-        # 确保焦点在子控件时，训练快捷键仍然生效
         self._install_key_filter()
 
         # ---- 初始化数据加载器 ----
@@ -98,13 +110,7 @@ class MainWindow(QMainWindow):
     # 快捷键事件过滤器
     # ============================================================
     def _install_key_filter(self):
-        """
-        对所有可聚焦子控件安装事件过滤器。
-
-        QTextEdit/QComboBox/QSpinBox 等控件会拦截键盘事件，
-        导致 MainWindow.keyPressEvent 收不到。
-        过滤器在子控件处理之前拦截训练快捷键。
-        """
+        """对所有可聚焦子控件安装事件过滤器。"""
         for widget in self.findChildren(QWidget):
             widget.installEventFilter(self)
 
@@ -125,14 +131,14 @@ class MainWindow(QMainWindow):
         self.chart = ChartCanvas(parent=self)
         splitter.addWidget(self.chart)
 
-        # 右侧：控制面板
+        # 右侧：Tab 面板
         right_panel = self._build_right_panel()
         splitter.addWidget(right_panel)
 
-        # 设置分割比例（图表:面板 = 4:1）
-        splitter.setStretchFactor(0, 4)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([1100, 300])
+        # 设置分割比例（图表:面板 = 5:2）
+        splitter.setStretchFactor(0, 5)
+        splitter.setStretchFactor(1, 2)
+        splitter.setSizes([1050, 420])
 
         main_layout.addWidget(splitter, stretch=1)
 
@@ -142,35 +148,77 @@ class MainWindow(QMainWindow):
 
         # ---- 状态栏 ----
         self.statusBar().showMessage("就绪 - 请选择通达信目录并开始训练")
-        self.statusBar().setStyleSheet("color: #cccccc;")
+        self.statusBar().setStyleSheet("color: #cccccc; font-size: 14px;")
 
     def _build_right_panel(self) -> QWidget:
-        """构建右侧控制面板。"""
+        """构建右侧 Tab 面板。"""
         panel = QWidget()
-        panel.setMaximumWidth(380)
-        panel.setMinimumWidth(280)
-        panel.setStyleSheet("""
-            QLabel { font-size: 13px; }
-            QComboBox { font-size: 13px; padding: 2px 4px; }
-            QSpinBox { font-size: 13px; padding: 2px 4px; }
-            QLineEdit { font-size: 13px; padding: 2px 4px; }
-            QPushButton { font-size: 13px; }
-            QGroupBox { font-size: 14px; font-weight: bold; }
-            QCheckBox { font-size: 13px; }
-        """)
+        panel.setMaximumWidth(520)
+        panel.setMinimumWidth(320)
         layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.right_tabs = QTabWidget()
+        self.right_tabs.setStyleSheet("""
+            QTabWidget::pane { border: 1px solid #3c3c3c; }
+            QTabBar::tab {
+                background-color: #3c3c3c; color: #cccccc;
+                padding: 8px 16px; border: 1px solid #555555;
+                border-bottom: none; border-top-left-radius: 4px;
+                border-top-right-radius: 4px; font-size: 14px;
+            }
+            QTabBar::tab:selected {
+                background-color: #2b2b2b; color: #ffffff;
+                border-bottom: 2px solid #4a9eff;
+            }
+        """)
+
+        # Tab 1: 训练配置
+        config_tab = self._build_config_tab()
+        self.right_tabs.addTab(config_tab, "⚙ 配置")
+
+        # Tab 2: 操作日志
+        log_tab = self._build_log_tab()
+        self.right_tabs.addTab(log_tab, "📋 日志")
+
+        # Tab 3: 训练统计
+        self.stats_panel = StatsPanel(self.db)
+        self.right_tabs.addTab(self.stats_panel, "📊 统计")
+
+        # Tab 切换时刷新统计面板
+        self.right_tabs.currentChanged.connect(self._on_tab_changed)
+
+        layout.addWidget(self.right_tabs)
+        return panel
+
+    def _build_config_tab(self) -> QWidget:
+        """构建训练配置 Tab。"""
+        tab = QWidget()
+        tab.setStyleSheet("""
+            QLabel { font-size: 15px; }
+            QComboBox { font-size: 15px; padding: 2px 4px; }
+            QSpinBox { font-size: 15px; padding: 2px 4px; }
+            QDoubleSpinBox { font-size: 15px; padding: 2px 4px; }
+            QLineEdit { font-size: 15px; padding: 2px 4px; }
+            QPushButton { font-size: 15px; }
+            QGroupBox { font-size: 16px; font-weight: bold; }
+            QCheckBox { font-size: 15px; }
+        """)
+        layout = QVBoxLayout(tab)
         layout.setSpacing(6)
 
         # ---- 快捷键说明 ----
         keys_group = QGroupBox("⌨ 快捷键说明")
         keys_layout = QVBoxLayout(keys_group)
         keys_text = (
-            "→ 逐根前进  |  ← 逐根后退\n"
-            "PgDn 快进10根  |  Space 观望\n"
-            "↑ 买入  |  ↓ 卖出  |  Esc 结束训练"
+            "→ 前进  |  ← 后退  |  PgDn 快进10\n"
+            "1/2/3/4 买入 25%/33%/50%/100%\n"
+            "Shift+1/2/3/4 卖出对应仓位\n"
+            "↑ 买入(默认仓位)  ↓ 卖出(默认仓位)\n"
+            "Space 观望  |  Esc 结束训练"
         )
         keys_label = QLabel(keys_text)
-        keys_label.setStyleSheet("color: #aaaaaa; font-size: 13px;")
+        keys_label.setStyleSheet("color: #aaaaaa; font-size: 14px;")
         keys_label.setWordWrap(True)
         keys_layout.addWidget(keys_label)
         layout.addWidget(keys_group)
@@ -210,13 +258,12 @@ class MainWindow(QMainWindow):
         panel_layout.addWidget(self.spin_panel_count)
         config_layout.addLayout(panel_layout)
 
-        # 副图指标选择（最多5个下拉框，根据面板数量显示/隐藏）
+        # 副图指标选择（最多5个下拉框）
         self.combo_subs = []
-        self.sub_indicator_widgets = []  # 每组的容器 QWidget
+        self.sub_indicator_widgets = []
         default_subs = self.config.get("default_sub_indicators",
                                        ["MACD", "KDJ", "RSI", "CCI", "BIAS"])
         for i in range(5):
-            # 用一个 QWidget 容器包裹 label+combo，方便整体隐藏
             container = QWidget()
             row = QHBoxLayout(container)
             row.setContentsMargins(0, 0, 0, 0)
@@ -233,10 +280,9 @@ class MainWindow(QMainWindow):
             self.combo_subs.append(combo)
             self.sub_indicator_widgets.append(container)
 
-        # 根据面板数量显示/隐藏
         self._update_combo_visibility()
 
-        # 主图叠加指标（复选框）
+        # 主图叠加指标
         overlay_layout = QHBoxLayout()
         overlay_layout.addWidget(QLabel("主图叠加:"))
         self.chk_ma5 = QCheckBox("MA5")
@@ -260,47 +306,144 @@ class MainWindow(QMainWindow):
 
         config_layout.addLayout(overlay_layout)
 
+        # ---- 止损止盈 ----
+        sl_tp_layout = QHBoxLayout()
+        sl_tp_layout.addWidget(QLabel("止损%:"))
+        self.spin_stop_loss = QDoubleSpinBox()
+        self.spin_stop_loss.setRange(0, 50)
+        self.spin_stop_loss.setDecimals(1)
+        self.spin_stop_loss.setSuffix("%")
+        sl_val = abs(self.config.get("trading", {}).get("stop_loss_pct", 0)) * 100
+        self.spin_stop_loss.setValue(sl_val)
+        sl_tp_layout.addWidget(self.spin_stop_loss)
+        sl_tp_layout.addWidget(QLabel("止盈%:"))
+        self.spin_take_profit = QDoubleSpinBox()
+        self.spin_take_profit.setRange(0, 200)
+        self.spin_take_profit.setDecimals(1)
+        self.spin_take_profit.setSuffix("%")
+        tp_val = abs(self.config.get("trading", {}).get("take_profit_pct", 0)) * 100
+        self.spin_take_profit.setValue(tp_val)
+        sl_tp_layout.addWidget(self.spin_take_profit)
+        config_layout.addLayout(sl_tp_layout)
+
         # 开始训练按钮
         self.btn_start = QPushButton("🚀 开始新训练")
         self.btn_start.setStyleSheet("""
             QPushButton {
-                background-color: #2d7d46;
-                color: white;
-                font-size: 16px;
-                font-weight: bold;
-                padding: 10px;
-                border-radius: 6px;
+                background-color: #2d7d46; color: white;
+                font-size: 18px; font-weight: bold;
+                padding: 10px; border-radius: 6px;
             }
-            QPushButton:hover {
-                background-color: #3a9e5a;
-            }
-            QPushButton:pressed {
-                background-color: #256e3c;
-            }
+            QPushButton:hover { background-color: #3a9e5a; }
+            QPushButton:pressed { background-color: #256e3c; }
         """)
         self.btn_start.clicked.connect(self.start_training)
         config_layout.addWidget(self.btn_start)
 
         layout.addWidget(config_group)
 
-        # ---- 操作日志 ----
-        log_group = QGroupBox("📋 操作日志")
-        log_layout = QVBoxLayout(log_group)
+        # ---- AI 设置 ----
+        ai_group = QGroupBox("🤖 AI 分析设置")
+        ai_layout = QVBoxLayout(ai_group)
+
+        ai_layout.addWidget(QLabel("Provider:"))
+        self.combo_ai_provider = QComboBox()
+        self.combo_ai_provider.addItems(["", "openai", "anthropic", "deepseek", "custom"])
+        ai_provider = self.config.get("ai", {}).get("provider", "")
+        idx = self.combo_ai_provider.findText(ai_provider)
+        if idx >= 0:
+            self.combo_ai_provider.setCurrentIndex(idx)
+        ai_layout.addWidget(self.combo_ai_provider)
+
+        ai_layout.addWidget(QLabel("API Key:"))
+        self.edit_api_key = QLineEdit()
+        self.edit_api_key.setEchoMode(QLineEdit.Password)
+        self.edit_api_key.setText(self.config.get("ai", {}).get("api_key", ""))
+        self.edit_api_key.setPlaceholderText("输入 API Key...")
+        ai_layout.addWidget(self.edit_api_key)
+
+        ai_layout.addWidget(QLabel("Base URL:"))
+        self.edit_base_url = QLineEdit()
+        self.edit_base_url.setPlaceholderText("自定义端点 (可选)")
+        self.edit_base_url.setText(self.config.get("ai", {}).get("base_url", ""))
+        ai_layout.addWidget(self.edit_base_url)
+
+        ai_layout.addWidget(QLabel("模型:"))
+        self.edit_model = QLineEdit()
+        self.edit_model.setPlaceholderText("如 gpt-4o-mini, deepseek-chat")
+        self.edit_model.setText(self.config.get("ai", {}).get("model", ""))
+        ai_layout.addWidget(self.edit_model)
+
+        # 保存按钮
+        self.btn_save_ai = QPushButton("💾 保存 AI 配置")
+        self.btn_save_ai.setStyleSheet("""
+            QPushButton {
+                background-color: #2d5a8e; color: #ffffff;
+                padding: 8px 16px; border: 1px solid #4a9eff;
+                border-radius: 4px; font-size: 15px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #3a7ac0; }
+            QPushButton:pressed { background-color: #1e4a70; }
+        """)
+        self.btn_save_ai.clicked.connect(self._on_save_ai_clicked)
+        ai_layout.addWidget(self.btn_save_ai)
+
+        layout.addWidget(ai_group)
+        layout.addStretch()
+
+        return tab
+
+    def _build_log_tab(self) -> QWidget:
+        """构建操作日志 Tab。"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        # ---- 顶部按钮栏 ----
+        btn_bar = QHBoxLayout()
+
+        self.btn_ai_analysis = QPushButton("🤖 AI 分析")
+        self.btn_ai_analysis.setStyleSheet("""
+            QPushButton {
+                background-color: #2d5a8e; color: #ffffff;
+                padding: 8px 20px; border: 1px solid #4a9eff;
+                border-radius: 4px; font-size: 15px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #3a7ac0; }
+            QPushButton:pressed { background-color: #1e4a70; }
+            QPushButton:disabled { background-color: #3c3c3c; color: #666666; border-color: #555555; }
+        """)
+        self.btn_ai_analysis.setToolTip("手动触发 AI 复盘分析（需先结束训练并配置 AI）")
+        self.btn_ai_analysis.clicked.connect(self._on_ai_analysis_clicked)
+
+        self.btn_export_prompt = QPushButton("📋 导出 Prompt")
+        self.btn_export_prompt.setStyleSheet("""
+            QPushButton {
+                background-color: #3c3c3c; color: #cccccc;
+                padding: 8px 20px; border: 1px solid #555555;
+                border-radius: 4px; font-size: 15px;
+            }
+            QPushButton:hover { background-color: #505050; }
+        """)
+        self.btn_export_prompt.setToolTip("导出分析 Prompt 到剪贴板（无需 API Key）")
+        self.btn_export_prompt.clicked.connect(self._on_export_prompt_clicked)
+
+        btn_bar.addWidget(self.btn_ai_analysis)
+        btn_bar.addWidget(self.btn_export_prompt)
+        btn_bar.addStretch()
+        layout.addLayout(btn_bar)
+
+        # ---- 日志文本框 ----
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setStyleSheet("""
             QTextEdit {
-                background-color: #1a1a1a;
-                color: #cccccc;
+                background-color: #1a1a1a; color: #cccccc;
                 font-family: Consolas, 'Courier New', monospace;
-                font-size: 14px;
-                border: 1px solid #3c3c3c;
+                font-size: 16px; border: 1px solid #3c3c3c;
             }
         """)
-        log_layout.addWidget(self.log_text)
-        layout.addWidget(log_group, stretch=1)
-
-        return panel
+        layout.addWidget(self.log_text)
+        return tab
 
     def _build_bottom_bar(self) -> QWidget:
         """构建底部操作按钮栏。"""
@@ -310,47 +453,28 @@ class MainWindow(QMainWindow):
 
         btn_style = """
             QPushButton {
-                background-color: #3c3c3c;
-                color: #cccccc;
-                padding: 6px 16px;
-                border: 1px solid #555555;
-                border-radius: 4px;
-                font-size: 13px;
+                background-color: #3c3c3c; color: #cccccc;
+                padding: 6px 16px; border: 1px solid #555555;
+                border-radius: 4px; font-size: 15px;
             }
-            QPushButton:hover {
-                background-color: #505050;
-            }
-            QPushButton:pressed {
-                background-color: #2a2a2a;
-            }
+            QPushButton:hover { background-color: #505050; }
+            QPushButton:pressed { background-color: #2a2a2a; }
         """
         btn_buy_style = """
             QPushButton {
-                background-color: #5a2020;
-                color: #ff6666;
-                padding: 6px 16px;
-                border: 1px solid #ff4444;
-                border-radius: 4px;
-                font-size: 13px;
-                font-weight: bold;
+                background-color: #5a2020; color: #ff6666;
+                padding: 6px 16px; border: 1px solid #ff4444;
+                border-radius: 4px; font-size: 15px; font-weight: bold;
             }
-            QPushButton:hover {
-                background-color: #7a3030;
-            }
+            QPushButton:hover { background-color: #7a3030; }
         """
         btn_sell_style = """
             QPushButton {
-                background-color: #1a4a1a;
-                color: #66ff66;
-                padding: 6px 16px;
-                border: 1px solid #00cc00;
-                border-radius: 4px;
-                font-size: 13px;
-                font-weight: bold;
+                background-color: #1a4a1a; color: #66ff66;
+                padding: 6px 16px; border: 1px solid #00cc00;
+                border-radius: 4px; font-size: 15px; font-weight: bold;
             }
-            QPushButton:hover {
-                background-color: #2a6a2a;
-            }
+            QPushButton:hover { background-color: #2a6a2a; }
         """
 
         buttons = [
@@ -358,8 +482,8 @@ class MainWindow(QMainWindow):
             ("⏩ 后一天", self.next_day, btn_style),
             ("⏭ 快进10", self.fast_forward, btn_style),
             ("⏹ 结束训练", self.end_training, btn_style),
-            ("📈 买入", self.do_buy, btn_buy_style),
-            ("📉 卖出", self.do_sell, btn_sell_style),
+            ("📈 买入", lambda: self.do_buy(), btn_buy_style),
+            ("📉 卖出", lambda: self.do_sell(), btn_sell_style),
         ]
 
         for text, slot, style in buttons:
@@ -406,7 +530,6 @@ class MainWindow(QMainWindow):
         """开始新的训练会话。"""
         # 检查数据加载器
         if not self.data_loader or not self.data_loader.is_available():
-            # 尝试用当前输入框路径初始化
             path = self.tdx_path_edit.text().strip()
             if path:
                 self.data_loader = DataLoader(path)
@@ -417,14 +540,22 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(
                     self, "数据源不可用",
                     "未找到通达信数据目录。\n"
-                    "请在右侧面板选择通达信安装目录，"
-                    "或设置 TDX_HOME 环境变量。"
+                    "请在右侧面板选择通达信安装目录。"
                 )
                 return
+
+        # 保存 AI 配置（用户可能在训练前修改了设置）
+        self._save_ai_config()
 
         # 重置状态
         self.trade_manager.reset()
         days = self.spin_days.value()
+
+        # 设置止损止盈
+        sl_pct = self.spin_stop_loss.value()
+        tp_pct = self.spin_take_profit.value()
+        self.trade_manager.set_stop_loss(-sl_pct / 100.0 if sl_pct > 0 else None)
+        self.trade_manager.set_take_profit(tp_pct / 100.0 if tp_pct > 0 else None)
 
         try:
             # 扫描并随机选股
@@ -441,26 +572,21 @@ class MainWindow(QMainWindow):
             self.indicator_hub.calculate_all()
             self.log("📈 指标计算完成")
 
-            # 设置初始推演位置（预热期）
+            # 设置初始推演位置
             self.min_warmup = self.indicator_hub.get_min_warmup()
             self.cursor = self.min_warmup
 
             # 设置画布数据
             self.chart.set_data(self.df, self.indicator_hub, self.trade_manager)
-            # 设置副图面板数量
             self.chart.setup_panels(self.spin_panel_count.value())
             overlays = self._get_enabled_overlays()
             sub_inds = self._get_sub_indicators()
-            self.chart.render(
-                self.cursor,
-                sub_inds,
-                overlays,
-            )
+            self.chart.render(self.cursor, sub_inds, overlays)
 
             self.training_active = True
             self.log(f"🎮 训练开始! 当前可见 {self.cursor}/{len(self.df)} 根K线")
             self.statusBar().showMessage(
-                f"训练中 | {self.stock_code} | 进度: {self.cursor}/{len(self.df)}"
+                f"训练中 | {self.stock_code} | 进度: {self.cursor}/{len(self.df)} | 仓位: 0%"
             )
 
         except Exception as e:
@@ -473,11 +599,16 @@ class MainWindow(QMainWindow):
             return
         if self.cursor < len(self.df):
             self.cursor += 1
+            # 更新浮动盈亏
+            row = self.df.iloc[self.cursor - 1]
+            self.trade_manager.update_floating(row["high"], row["low"])
+            # 检查止损止盈
+            self._check_sl_tp()
             self._refresh_chart()
             self.statusBar().showMessage(
-                f"训练中 | {self.stock_code} | 进度: {self.cursor}/{len(self.df)}"
+                f"训练中 | {self.stock_code} | 进度: {self.cursor}/{len(self.df)} | "
+                f"仓位: {self.trade_manager.position*100:.0f}%"
             )
-            # 到达最后一根，自动结束
             if self.cursor >= len(self.df):
                 self.log("🏁 已到达最后一根K线")
                 self.end_training()
@@ -490,42 +621,68 @@ class MainWindow(QMainWindow):
             self.cursor -= 1
             self._refresh_chart()
             self.statusBar().showMessage(
-                f"训练中 | {self.stock_code} | 进度: {self.cursor}/{len(self.df)}"
+                f"训练中 | {self.stock_code} | 进度: {self.cursor}/{len(self.df)} | "
+                f"仓位: {self.trade_manager.position*100:.0f}%"
             )
 
     def fast_forward(self):
-        """快进10天（PgDn键）。"""
+        """快进10天（PgDn键），逐根检查止损止盈。"""
         if not self.training_active or self.df is None:
             return
-        self.cursor = min(self.cursor + 10, len(self.df))
+        target = min(self.cursor + 10, len(self.df))
+        while self.cursor < target:
+            self.cursor += 1
+            row = self.df.iloc[self.cursor - 1]
+            self.trade_manager.update_floating(row["high"], row["low"])
+            # 持仓时检查止损止盈
+            if self.trade_manager.position > 0:
+                trigger = self.trade_manager.check_stop_loss_take_profit(
+                    self.cursor - 1, row["high"], row["low"], row["date"]
+                )
+                if trigger:
+                    self._execute_auto_exit(trigger, self.cursor - 1, row)
+                    break  # 自动退出后停止推进
         self._refresh_chart()
         self.statusBar().showMessage(
-            f"训练中 | {self.stock_code} | 进度: {self.cursor}/{len(self.df)}"
+            f"训练中 | {self.stock_code} | 进度: {self.cursor}/{len(self.df)} | "
+            f"仓位: {self.trade_manager.position*100:.0f}%"
         )
         if self.cursor >= len(self.df):
             self.log("🏁 已到达最后一根K线")
             self.end_training()
 
-    def do_buy(self):
-        """模拟买入（↑键）。"""
+    def do_buy(self, ratio: float = None):
+        """模拟买入。"""
         if not self.training_active or self.df is None:
             return
+        if ratio is None:
+            ratio = self.default_buy_ratio
         price = self.df.iloc[self.cursor - 1]["close"]
         date = self.df.iloc[self.cursor - 1]["date"]
-        if self.trade_manager.buy(self.cursor - 1, price, date):
-            self.log(f"📈 买入 @ {price:.2f} ({date})")
+        if self.trade_manager.buy(self.cursor - 1, price, date, ratio):
+            pct = ratio * 100
+            self.log(
+                f"📈 买入 {pct:.0f}% @ {price:.2f} ({date}) "
+                f"仓位:{self.trade_manager.position*100:.0f}%"
+            )
             self._refresh_chart()
         else:
-            self.log("⚠ 已持仓，无法重复买入")
+            self.log("⚠ 已满仓，无法继续买入")
 
-    def do_sell(self):
-        """模拟卖出（↓键）。"""
+    def do_sell(self, ratio: float = None):
+        """模拟卖出。"""
         if not self.training_active or self.df is None:
             return
+        if ratio is None:
+            ratio = self.default_sell_ratio
         price = self.df.iloc[self.cursor - 1]["close"]
         date = self.df.iloc[self.cursor - 1]["date"]
-        if self.trade_manager.sell(self.cursor - 1, price, date):
-            self.log(f"📉 卖出 @ {price:.2f} ({date})")
+        if self.trade_manager.sell(self.cursor - 1, price, date, ratio):
+            pct = ratio * 100
+            self.log(
+                f"📉 卖出 {pct:.0f}% @ {price:.2f} ({date}) "
+                f"仓位:{self.trade_manager.position*100:.0f}%"
+            )
             self._refresh_chart()
         else:
             self.log("⚠ 当前空仓，无法卖出")
@@ -540,14 +697,18 @@ class MainWindow(QMainWindow):
         self.cursor = len(self.df)
         self._refresh_chart()
 
-        # 打印收益总结
+        # 计算时机评分
+        self.trade_manager.score_all_timing(self.df)
+
         last_price = self.df.iloc[-1]["close"]
         summary = self.trade_manager.summary(last_price)
         self.log(summary)
 
-        # 生成并保存详细训练报告
+        # 生成报告
+        report_path = ""
+        report_text = ""
         try:
-            report_path = generate_report(
+            report_path, report_text = generate_report(
                 stock_code=self.stock_code,
                 df=self.df,
                 indicator_hub=self.indicator_hub,
@@ -555,28 +716,176 @@ class MainWindow(QMainWindow):
                 cursor=self.cursor,
                 config=self.config,
             )
-            self.log(f"训练报告已保存: {report_path}")
-            self.statusBar().showMessage(
-                f"训练结束 | {self.stock_code} | 报告: {report_path}"
-            )
+            self.log(f"📄 训练报告已保存: {report_path}")
         except Exception as e:
-            self.log(f"报告生成失败: {e}")
-            self.statusBar().showMessage(
-                f"训练结束 | {self.stock_code} | 总K线: {len(self.df)}"
+            self.log(f"❌ 报告生成失败: {e}")
+
+        # 保存到数据库
+        try:
+            session_id = self.db.save_session(
+                self.stock_code, self.df, self.trade_manager,
+                report_path, self.config,
             )
+            self.log(f"💾 训练记录已保存 (ID: {session_id})")
+        except Exception as e:
+            self.log(f"❌ 数据库保存失败: {e}")
+
+        # AI 分析 — 保存最新配置后提示用户手动触发
+        self._save_ai_config()
+        self._last_report_path = report_path
+        self._last_report_text = report_text
+        self._last_summary = summary
+        if report_text:
+            if self.ai_analyzer.is_configured():
+                self.log("💡 训练结束。点击日志 Tab 中的「🤖 AI 分析」按钮获取 AI 复盘。")
+            else:
+                self.log("💡 AI 未配置。可在配置面板设置 API Key，或点击「📋 导出 Prompt」手动分析。")
+
+        self.statusBar().showMessage(
+            f"训练结束 | {self.stock_code} | 报告: {report_path}"
+        )
+
+    # ============================================================
+    # 止损止盈
+    # ============================================================
+    def _check_sl_tp(self):
+        """检查当前 bar 是否触发止损止盈。"""
+        if self.trade_manager.position <= 0:
+            return
+        idx = self.cursor - 1
+        row = self.df.iloc[idx]
+        trigger = self.trade_manager.check_stop_loss_take_profit(
+            idx, row["high"], row["low"], row["date"]
+        )
+        if trigger:
+            self._execute_auto_exit(trigger, idx, row)
+
+    def _execute_auto_exit(self, trigger: str, idx: int, row):
+        """执行自动止损/止盈卖出。"""
+        if trigger == "stop_loss":
+            price = row["low"]  # 止损以最低价成交（保守）
+            self.trade_manager.sell(idx, price, row["date"], 1.0,
+                                    is_auto=True, auto_reason="stop_loss")
+            self.log(f"🔴 [自动止损] @ {price:.2f} ({row['date']})")
+        elif trigger == "take_profit":
+            price = row["high"]  # 止盈以最高价成交（乐观）
+            self.trade_manager.sell(idx, price, row["date"], 1.0,
+                                    is_auto=True, auto_reason="take_profit")
+            self.log(f"🟢 [自动止盈] @ {price:.2f} ({row['date']})")
+
+    # ============================================================
+    # AI 回调
+    # ============================================================
+    def _on_ai_success(self, analysis_text: str, report_path: str):
+        """AI 分析成功回调。"""
+        self.log("✅ AI 分析完成!")
+        self.btn_ai_analysis.setEnabled(True)
+        self.btn_ai_analysis.setText("🤖 AI 分析")
+
+        # 1) 显示在日志中
+        self.log("──── AI 复盘分析 ────")
+        for line in analysis_text.split("\n"):
+            if line.strip():
+                self.log(line)
+        self.log("──── 分析结束 ────")
+
+        # 2) 追加到报告文件
+        if report_path:
+            try:
+                from pathlib import Path as PPath
+                p = PPath(report_path)
+                if p.is_file():
+                    with open(p, "a", encoding="utf-8") as f:
+                        f.write("\n\n## AI 复盘分析\n\n")
+                        f.write(analysis_text)
+                    self.log(f"📄 AI 分析已追加到报告: {report_path}")
+            except Exception as e:
+                self.log(f"⚠ 追加 AI 分析到报告失败: {e}")
+
+        # 3) 保存到 docs/ 目录为独立 MD 文件
+        try:
+            docs_dir = Path(__file__).parent / "docs"
+            docs_dir.mkdir(exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            stock = self.stock_code or "unknown"
+            ai_path = docs_dir / f"ai_analysis_{stock}_{timestamp}.md"
+            with open(ai_path, "w", encoding="utf-8") as f:
+                f.write(f"# AI 复盘分析 — {stock}\n\n")
+                f.write(f"**分析时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                f.write(analysis_text)
+            self.log(f"💾 AI 分析已保存: {ai_path}")
+        except Exception as e:
+            self.log(f"⚠ 保存 AI 分析文件失败: {e}")
+
+    def _on_ai_error(self, error_msg: str):
+        """AI 分析失败回调。"""
+        self.log(f"⚠ AI 分析失败: {error_msg}")
+        self.log("💡 可使用「📋 导出 Prompt」功能手动分析。")
+        self.btn_ai_analysis.setEnabled(True)
+        self.btn_ai_analysis.setText("🤖 AI 分析")
+
+    def _on_ai_analysis_clicked(self):
+        """手动触发 AI 分析按钮回调。"""
+        # 先保存最新 AI 配置
+        self._save_ai_config()
+
+        if not self.ai_analyzer.is_configured():
+            QMessageBox.warning(
+                self, "AI 未配置",
+                "请先在「⚙ 配置」Tab 中设置 AI Provider 和 API Key。\n\n"
+                "支持 OpenAI / Anthropic / DeepSeek / 自定义端点。"
+            )
+            return
+
+        report_text = getattr(self, "_last_report_text", "")
+        summary = getattr(self, "_last_summary", "")
+        report_path = getattr(self, "_last_report_path", "")
+
+        if not report_text:
+            QMessageBox.information(
+                self, "无报告数据",
+                "请先完成一次训练（按 Esc 结束），再进行 AI 分析。"
+            )
+            return
+
+        # 禁用按钮防止重复点击
+        self.btn_ai_analysis.setEnabled(False)
+        self.btn_ai_analysis.setText("🤖 分析中...")
+        self.log("🤖 正在调用 AI 分析，请稍候（最长约 2 分钟）...")
+
+        self.ai_analyzer.analyze_async(
+            report_text, summary,
+            on_success=lambda text: self._on_ai_success(text, report_path),
+            on_error=self._on_ai_error,
+        )
+
+    def _on_export_prompt_clicked(self):
+        """导出 Prompt 到剪贴板。"""
+        self._save_ai_config()
+
+        report_text = getattr(self, "_last_report_text", "")
+        summary = getattr(self, "_last_summary", "")
+
+        if not report_text:
+            QMessageBox.information(
+                self, "无报告数据",
+                "请先完成一次训练（按 Esc 结束），再导出 Prompt。"
+            )
+            return
+
+        prompt = self.ai_analyzer.export_prompt(report_text, summary)
+        clipboard = QApplication.clipboard()
+        clipboard.setText(prompt)
+        self.log("📋 分析 Prompt 已复制到剪贴板，可粘贴到任意 AI 工具使用。")
 
     # ============================================================
     # 图表刷新辅助
     # ============================================================
     def _refresh_chart(self):
-        """刷新图表（保留当前指标选择）。"""
+        """刷新图表。"""
         overlays = self._get_enabled_overlays()
         sub_inds = self._get_sub_indicators()
-        self.chart.render(
-            self.cursor,
-            sub_inds,
-            overlays,
-        )
+        self.chart.render(self.cursor, sub_inds, overlays)
 
     def _get_sub_indicators(self) -> list:
         """获取当前各副图选中的指标名称列表。"""
@@ -600,6 +909,33 @@ class MainWindow(QMainWindow):
         if self.chk_boll.isChecked():
             overlays.append("BOLL")
         return overlays
+
+    # ============================================================
+    # 配置保存
+    # ============================================================
+    def _save_ai_config(self):
+        """保存 AI 配置到 config。"""
+        self.config["ai"] = {
+            "provider": self.combo_ai_provider.currentText(),
+            "api_key": self.edit_api_key.text(),
+            "base_url": self.edit_base_url.text(),
+            "model": self.edit_model.text(),
+        }
+        # 更新 AI analyzer 的配置引用
+        self.ai_analyzer.config = self.config
+        save_config(self.config)
+
+    def _on_save_ai_clicked(self):
+        """AI 配置保存按钮回调。"""
+        self._save_ai_config()
+        self.log("✅ AI 配置已保存到 config.yaml")
+        self.btn_save_ai.setText("✅ 已保存")
+        # 2秒后恢复按钮文字
+        try:
+            from PySide6.QtCore import QTimer
+        except ImportError:
+            from PyQt5.QtCore import QTimer
+        QTimer.singleShot(2000, lambda: self.btn_save_ai.setText("💾 保存 AI 配置"))
 
     # ============================================================
     # 事件回调
@@ -627,20 +963,32 @@ class MainWindow(QMainWindow):
         if self.training_active or self.df is not None:
             self._refresh_chart()
 
+    def _on_tab_changed(self, index: int):
+        """Tab 切换回调。"""
+        if index == 2:  # 统计面板
+            self.stats_panel.refresh()
+
     def keyPressEvent(self, event):
         """键盘事件分发。"""
-        if self._handle_key(event.key()):
+        if self._handle_key(event.key(), event.modifiers()):
             event.accept()
         else:
             super().keyPressEvent(event)
 
-    def _handle_key(self, key) -> bool:
+    def _handle_key(self, key, modifiers=None) -> bool:
         """
         统一处理按键逻辑。
 
-        被 keyPressEvent 和 eventFilter 共同调用。
-        返回 True 表示已处理，False 表示未处理。
+        Args:
+            key: 按键码
+            modifiers: 修饰键（Shift 等）
+        Returns:
+            bool: 是否已处理
         """
+        if modifiers is None:
+            modifiers = Qt.NoModifier
+
+        # 方向/翻页
         if key == Qt.Key_Right:
             self.next_day()
             return True
@@ -650,51 +998,92 @@ class MainWindow(QMainWindow):
         elif key == Qt.Key_PageDown:
             self.fast_forward()
             return True
+
+        # 观望 / 结束
+        elif key == Qt.Key_Space:
+            if self.training_active:
+                self.log("⏸ 观望")
+            return True
+        elif key == Qt.Key_Escape:
+            self.end_training()
+            return True
+
+        # ↑↓ 使用默认仓位
         elif key == Qt.Key_Up:
             self.do_buy()
             return True
         elif key == Qt.Key_Down:
             self.do_sell()
             return True
-        elif key == Qt.Key_Space:
-            if self.training_active:
-                self.log("观望")
+
+        # 数字键 1-4：买入 / Shift+1-4：卖出
+        elif key == Qt.Key_1:
+            if modifiers & Qt.ShiftModifier:
+                self.do_sell(0.25)
+            else:
+                self.do_buy(0.25)
             return True
-        elif key == Qt.Key_Escape:
-            self.end_training()
+        elif key == Qt.Key_2:
+            if modifiers & Qt.ShiftModifier:
+                self.do_sell(0.333)
+            else:
+                self.do_buy(0.333)
             return True
+        elif key == Qt.Key_3:
+            if modifiers & Qt.ShiftModifier:
+                self.do_sell(0.50)
+            else:
+                self.do_buy(0.50)
+            return True
+        elif key == Qt.Key_4:
+            if modifiers & Qt.ShiftModifier:
+                self.do_sell(1.0)
+            else:
+                self.do_buy(1.0)
+            return True
+
         return False
 
     def eventFilter(self, obj, event):
         """
         全局事件过滤器。
 
-        当焦点在 QTextEdit/QComboBox/QSpinBox 等子控件时，
-        这些控件会拦截按键事件，导致 MainWindow.keyPressEvent 收不到。
-        此过滤器拦截关键快捷键，直接交给 _handle_key 处理。
+        拦截训练快捷键，但不在文本输入控件中拦截数字键。
         """
         if event.type() == QEvent.Type.KeyPress:
             key = event.key()
-            # 仅拦截训练相关的快捷键，其他按键交给控件自行处理
+            modifiers = event.modifiers()
+
+            # 方向/功能键：始终拦截
             if key in (Qt.Key_Right, Qt.Key_Left, Qt.Key_PageDown,
-                       Qt.Key_Up, Qt.Key_Down, Qt.Key_Space, Qt.Key_Escape):
-                if self._handle_key(key):
-                    return True  # 事件已处理，不再传播
+                       Qt.Key_Space, Qt.Key_Escape):
+                if self._handle_key(key, modifiers):
+                    return True
+
+            # ↑↓ 键：始终拦截
+            if key in (Qt.Key_Up, Qt.Key_Down):
+                if self._handle_key(key, modifiers):
+                    return True
+
+            # 数字键：仅在训练中且焦点不在文本控件时拦截
+            if key in (Qt.Key_1, Qt.Key_2, Qt.Key_3, Qt.Key_4):
+                if self.training_active:
+                    # 检查焦点是否在文本输入控件中
+                    focus_widget = QApplication.focusWidget()
+                    is_text_input = isinstance(focus_widget, (QLineEdit, QTextEdit, QSpinBox))
+                    if not is_text_input:
+                        if self._handle_key(key, modifiers):
+                            return True
+
         return super().eventFilter(obj, event)
 
     # ============================================================
     # 日志
     # ============================================================
     def log(self, msg: str):
-        """
-        在操作日志中追加带时间戳的消息。
-
-        Args:
-            msg: 日志消息文本
-        """
+        """在操作日志中追加带时间戳的消息。"""
         timestamp = QDateTime.currentDateTime().toString("HH:mm:ss")
         self.log_text.append(f"[{timestamp}] {msg}")
-        # 自动滚动到底部
         scrollbar = self.log_text.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
@@ -706,8 +1095,6 @@ def main():
     """应用入口函数。"""
 
     # ===================== 使用期限 =====================
-    # 硬编码过期日期，到期后程序拒绝启动
-    # 修改下方日期即可延长使用期限
     EXPIRE_DATE = datetime(2026, 12, 31)
     # ===================================================
 

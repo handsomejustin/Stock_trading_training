@@ -1,7 +1,7 @@
-PySide6>=6.5
 PyQt5>=5.15
 matplotlib>=3.5
 pyyaml>=6.0
 numpy>=1.23
 pandas>=1.5
 easy-tdx>=1.5.0
+requests>=2.28

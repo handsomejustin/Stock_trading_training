@@ -19,6 +19,18 @@ _DEFAULT_CONFIG = {
     "panel_count": 3,
     "default_sub_indicators": ["MACD", "KDJ", "RSI", "CCI", "BIAS"],
     "default_main_overlays": ["MA5", "MA20"],
+    "ai": {
+        "provider": "",       # openai / anthropic / deepseek / custom
+        "api_key": "",
+        "base_url": "",       # 自定义 API 端点
+        "model": "",          # 模型名称
+    },
+    "trading": {
+        "default_buy_ratio": 1.0,   # ↑ 键默认买入仓位
+        "default_sell_ratio": 1.0,  # ↓ 键默认卖出仓位
+        "stop_loss_pct": 0.0,       # 默认止损百分比（0 = 不启用）
+        "take_profit_pct": 0.0,     # 默认止盈百分比
+    },
     "indicators": {
         "MACD": {"SHORT": 12, "LONG": 26, "M": 9},
         "KDJ": {"N": 9, "M1": 3, "M2": 3},
