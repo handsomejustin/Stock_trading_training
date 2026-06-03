@@ -397,11 +397,14 @@ class ChartCanvas(FigureCanvasQTAgg):
             for line_info in overlay_lines:
                 arr = line_info["array"][:cursor]
                 if len(arr) == n:
+                    idx = cursor - 1
+                    val = arr[idx]
+                    label_text = f"{line_info['name']}: {val:.2f}" if not np.isnan(val) else f"{line_info['name']}: --"
                     self.ax_kline.plot(
                         range(n), arr,
                         color=line_info["color"],
                         linewidth=line_info["linewidth"],
-                        label=line_info["name"],
+                        label=label_text,
                     )
 
         # ---- 绘制止损/止盈参考线 ----
@@ -569,6 +572,7 @@ class ChartCanvas(FigureCanvasQTAgg):
 
         # 画柱状输出（如 MACD 柱）
         bar_output = reg.get("bar_output")
+        idx = cursor - 1  # 当天数据索引
         if bar_output and bar_output in data:
             bar_data = data[bar_output][:cursor]
             bar_colors = [
@@ -576,13 +580,21 @@ class ChartCanvas(FigureCanvasQTAgg):
                 for v in bar_data
             ]
             ax.bar(range(len(bar_data)), bar_data, color=bar_colors, width=0.8, alpha=0.8)
+            # 柱状数值显示
+            if cursor > 0:
+                bar_val = data[bar_output][idx]
+                bar_label = f"{bar_output}: {bar_val:.4f}" if not np.isnan(bar_val) else f"{bar_output}: --"
+                # 用一个不可见的 bar 占位来加入 legend
+                ax.bar([], [], color=self.COLOR_TEXT, label=bar_label)
 
         # 画主 outputs 线图
         for out_name, color in zip(reg["outputs"], reg["colors"]):
             if out_name in data and out_name != bar_output:
                 arr = data[out_name][:cursor]
                 if len(arr) == cursor:
-                    ax.plot(range(cursor), arr, color=color, linewidth=1.0, label=out_name)
+                    val = arr[idx]
+                    label_text = f"{out_name}: {val:.2f}" if not np.isnan(val) else f"{out_name}: --"
+                    ax.plot(range(cursor), arr, color=color, linewidth=1.0, label=label_text)
 
         # 画 extra_lines 均线叠加（OBV_MA30, CR_MA10 等）
         extra_lines = reg.get("extra_lines", [])
@@ -592,8 +604,10 @@ class ChartCanvas(FigureCanvasQTAgg):
             if el_name in data:
                 arr = data[el_name][:cursor]
                 if len(arr) == cursor:
+                    val = arr[idx]
+                    label_text = f"{el_name}: {val:.2f}" if not np.isnan(val) else f"{el_name}: --"
                     ax.plot(range(cursor), arr, color=el_color, linewidth=0.8,
-                            linestyle="--", label=el_name)
+                            linestyle="--", label=label_text)
 
         # 画零线
         if reg.get("zero_line"):
