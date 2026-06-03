@@ -27,6 +27,10 @@ trading:
   default_sell_ratio: 1.0
   stop_loss_pct: 0.0
   take_profit_pct: 0.0
+update:
+  server_url: https://stock.maolige.com
+  auto_check: true
+  skip_version: ''
 indicators:
   MACD:
     SHORT: 12

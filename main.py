@@ -16,9 +16,10 @@ try:
         QLabel, QLineEdit, QPushButton, QSpinBox, QComboBox, QTextEdit,
         QFileDialog, QGroupBox, QStatusBar, QCheckBox,
         QMessageBox, QSplitter, QTabWidget, QDoubleSpinBox,
+        QProgressDialog,
     )
-    from PySide6.QtCore import Qt, QDateTime, QEvent, QThread, Signal
-    from PySide6.QtGui import QPalette, QColor, QFont, QIcon, QPainter, QPen
+    from PySide6.QtCore import Qt, QDateTime, QEvent, QThread, Signal, QTimer
+    from PySide6.QtGui import QPalette, QColor, QFont, QIcon, QPainter, QPen, QAction
     from PySide6.QtWidgets import QApplication as QApp
 except ImportError:
     from PyQt5.QtWidgets import (
@@ -26,9 +27,11 @@ except ImportError:
         QLabel, QLineEdit, QPushButton, QSpinBox, QComboBox, QTextEdit,
         QFileDialog, QGroupBox, QStatusBar, QCheckBox,
         QMessageBox, QSplitter, QTabWidget, QDoubleSpinBox,
+        QProgressDialog,
     )
-    from PyQt5.QtCore import Qt, QDateTime, QEvent, QThread, pyqtSignal as Signal
+    from PyQt5.QtCore import Qt, QDateTime, QEvent, QThread, pyqtSignal as Signal, QTimer
     from PyQt5.QtGui import QPalette, QColor, QFont, QIcon, QPainter, QPen
+    from PyQt5.QtWidgets import QAction
 
 from config import load_config, save_config
 from data_loader import DataLoader
@@ -39,6 +42,7 @@ from report_generator import generate_report
 from db import Database
 from ai_analyzer import AIAnalyzer
 from stats_panel import StatsPanel
+from updater import __version__, check_update, download_update, apply_update, UpdateInfo
 
 
 # ============================================================
@@ -124,12 +128,50 @@ class LoadWorker(QThread):
             self.finished_err.emit(str(e))
 
 
+class _UpdateCheckThread(QThread):
+    """后台线程：检查更新。"""
+    found = Signal(object)      # UpdateInfo
+    not_found = Signal()
+
+    def __init__(self, config: dict):
+        super().__init__()
+        self.config = config
+
+    def run(self):
+        info = check_update(self.config)
+        if info:
+            self.found.emit(info)
+        else:
+            self.not_found.emit()
+
+
+class _UpdateDownloadThread(QThread):
+    """后台线程：下载更新文件。"""
+    progress = Signal(int, int)     # downloaded, total
+    done = Signal(str)              # zip_path
+    error = Signal(str)             # error message
+
+    def __init__(self, info: UpdateInfo):
+        super().__init__()
+        self.info = info
+
+    def run(self):
+        try:
+            zip_path = download_update(self.info, progress_cb=self._on_progress)
+            self.done.emit(zip_path)
+        except Exception as e:
+            self.error.emit(str(e))
+
+    def _on_progress(self, downloaded: int, total: int):
+        self.progress.emit(downloaded, total)
+
+
 class MainWindow(QMainWindow):
     """盘感训练器主窗口。"""
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("盘感训练器 - K线推演模拟交易")
+        self.setWindowTitle(f"盘感训练器 v{__version__} - K线推演模拟交易")
         self.resize(1500, 900)
 
         # ---- 窗口图标 ----
@@ -167,8 +209,153 @@ class MainWindow(QMainWindow):
         # ---- 安装全局事件过滤器 ----
         self._install_key_filter()
 
+        # ---- 菜单栏 ----
+        self._build_menu()
+
         # ---- 初始化数据加载器 ----
         self._init_data_loader()
+
+        # ---- 启动时自动检查更新 ----
+        self._pending_update: UpdateInfo | None = None
+        update_cfg = self.config.get("update", {})
+        if update_cfg.get("auto_check", True):
+            QTimer.singleShot(3000, self._silent_check_update)
+
+    # ============================================================
+    # 菜单栏 & 自动更新
+    # ============================================================
+    def _build_menu(self):
+        """构建菜单栏。"""
+        menubar = self.menuBar()
+        menubar.setStyleSheet("""
+            QMenuBar { background: #2d2d2d; color: #cccccc; font-size: 14px; }
+            QMenuBar::item:selected { background: #3d3d3d; }
+            QMenu { background: #2d2d2d; color: #cccccc; font-size: 14px; }
+            QMenu::item:selected { background: #0078d7; }
+        """)
+
+        help_menu = menubar.addMenu("帮助")
+
+        check_action = QAction("检查更新…", self)
+        check_action.triggered.connect(self._manual_check_update)
+        help_menu.addAction(check_action)
+
+        about_action = QAction(f"关于 (v{__version__})", self)
+        about_action.triggered.connect(
+            lambda: QMessageBox.about(self, "关于", f"盘感训练器 v{__version__}\n\nK线推演模拟交易工具")
+        )
+        help_menu.addAction(about_action)
+
+    def _silent_check_update(self):
+        """启动时静默检查更新（后台线程）。"""
+        if self._pending_update is not None:
+            return  # 已经在检查
+        self._update_check_thread = _UpdateCheckThread(self.config)
+        self._update_check_thread.found.connect(self._on_update_found)
+        self._update_check_thread.start()
+
+    def _manual_check_update(self):
+        """手动检查更新（菜单触发）。"""
+        self.statusBar().showMessage("正在检查更新…")
+        self._manual_check_thread = _UpdateCheckThread(self.config)
+        self._manual_check_thread.found.connect(self._on_update_found)
+        self._manual_check_thread.not_found.connect(self._on_update_not_found)
+        self._manual_check_thread.start()
+
+    def _on_update_found(self, info: UpdateInfo):
+        """发现新版本回调。"""
+        self._pending_update = info
+        # 状态栏显示可点击的更新提示
+        self.statusBar().showMessage(
+            f"🔄 发现新版本 v{info.version} — 点击此处或菜单「帮助 → 检查更新」进行升级"
+        )
+        self.statusBar().linkActivated.connect(lambda: self._prompt_update())
+        # 弹窗提示
+        self._prompt_update()
+
+    def _on_update_not_found(self):
+        """手动检查：已是最新版本。"""
+        self.statusBar().showMessage(f"当前已是最新版本 (v{__version__})")
+
+    def _prompt_update(self):
+        """弹窗询问用户是否升级。"""
+        info = self._pending_update
+        if not info:
+            return
+
+        changelog_text = info.changelog or "详见发布说明"
+        msg = (
+            f"<h3>发现新版本 v{info.version}</h3>"
+            f"<p>当前版本: v{__version__}</p>"
+            f"<hr>"
+            f"<p><b>更新内容：</b></p>"
+            f"<p>{changelog_text}</p>"
+            f"<hr>"
+            f"<p>文件大小: {info.size / 1024 / 1024:.1f} MB</p>"
+        )
+
+        reply = QMessageBox.question(
+            self, "软件更新", msg,
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Ignore,
+            QMessageBox.Yes,
+        )
+
+        if reply == QMessageBox.Yes:
+            self._do_download_update(info)
+        elif reply == QMessageBox.Ignore:
+            # 跳过此版本
+            self.config.setdefault("update", {})["skip_version"] = info.version
+            save_config(self.config)
+            self._pending_update = None
+            self.statusBar().showMessage(f"已跳过 v{info.version}")
+
+    def _do_download_update(self, info: UpdateInfo):
+        """下载更新并显示进度条。"""
+        progress = QProgressDialog("正在下载更新…", "取消", 0, 100, self)
+        progress.setWindowTitle("下载更新")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setStyleSheet("""
+            QProgressDialog { background: #2d2d2d; color: #cccccc; }
+            QProgressBar { border: 1px solid #555; text-align: center; background: #1e1e1e; }
+            QProgressBar::chunk { background: #0078d7; }
+        """)
+
+        self._update_download_thread = _UpdateDownloadThread(info)
+        self._update_download_thread.progress.connect(
+            lambda d, t: progress.setValue(int(d / t * 100)) if t > 0 else None
+        )
+        self._update_download_thread.done.connect(self._on_download_done)
+        self._update_download_thread.error.connect(self._on_download_error)
+        self._update_download_thread.start()
+
+        progress.canceled.connect(self._update_download_thread.quit)
+        self._update_progress = progress
+
+    def _on_download_done(self, zip_path: str):
+        """下载完成，确认后执行升级。"""
+        if hasattr(self, "_update_progress"):
+            self._update_progress.close()
+
+        reply = QMessageBox.question(
+            self, "升级确认",
+            "下载完成！程序将关闭并自动升级，是否继续？\n\n"
+            "升级过程中请勿操作，完成后程序会自动重启。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply == QMessageBox.Yes:
+            apply_update(zip_path)
+        else:
+            # 保留 zip 文件，下次可重试
+            self.statusBar().showMessage("升级已取消，下载文件已保留")
+
+    def _on_download_error(self, err_msg: str):
+        """下载失败。"""
+        if hasattr(self, "_update_progress"):
+            self._update_progress.close()
+        QMessageBox.critical(self, "下载失败", f"更新下载失败:\n{err_msg}")
 
     # ============================================================
     # 暗色主题

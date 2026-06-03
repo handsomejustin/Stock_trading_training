@@ -1,0 +1,27 @@
+{
+  "latest": "1.1.2",
+  "versions": {
+    "1.1.2": {
+      "release_date": "2026-06-03",
+      "changelog": "加载动画 + 均线实时更新\n\n新功能：\n• 训练开始时显示居中遮罩动画，后台线程加载数据，不再假死\n• 修改均线周期后立即重新计算并刷新图表\n\nBug 修复：\n• 修改均线周期输入框后图表无变化\n• 均线周期减少后旧均线残留",
+      "platforms": {
+        "win-x64": {
+          "url": "/static/releases/盘感训练器-1.1.2-win-x64.zip",
+          "sha256": "",
+          "size": 0
+        }
+      }
+    },
+    "1.1.1": {
+      "release_date": "2026-06-03",
+      "changelog": "敏感信息清理 & CI 修复",
+      "platforms": {
+        "win-x64": {
+          "url": "/static/releases/盘感训练器-1.1.1-win-x64.zip",
+          "sha256": "",
+          "size": 0
+        }
+      }
+    }
+  }
+}

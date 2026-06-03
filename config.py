@@ -33,6 +33,11 @@ _DEFAULT_CONFIG = {
         "stop_loss_pct": 0.0,       # 默认止损百分比（0 = 不启用）
         "take_profit_pct": 0.0,     # 默认止盈百分比
     },
+    "update": {
+        "server_url": "https://stock.maolige.com",  # 升级服务器
+        "auto_check": True,                          # 启动时自动检查
+        "skip_version": "",                          # 跳过的版本号
+    },
     "indicators": {
         "MACD": {"SHORT": 12, "LONG": 26, "M": 9},
         "KDJ": {"N": 9, "M1": 3, "M2": 3},
