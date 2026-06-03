@@ -17,8 +17,8 @@ try:
         QFileDialog, QGroupBox, QStatusBar, QCheckBox,
         QMessageBox, QSplitter, QTabWidget, QDoubleSpinBox,
     )
-    from PySide6.QtCore import Qt, QDateTime, QEvent
-    from PySide6.QtGui import QPalette, QColor, QFont, QIcon
+    from PySide6.QtCore import Qt, QDateTime, QEvent, QThread, Signal
+    from PySide6.QtGui import QPalette, QColor, QFont, QIcon, QPainter, QPen
     from PySide6.QtWidgets import QApplication as QApp
 except ImportError:
     from PyQt5.QtWidgets import (
@@ -27,8 +27,8 @@ except ImportError:
         QFileDialog, QGroupBox, QStatusBar, QCheckBox,
         QMessageBox, QSplitter, QTabWidget, QDoubleSpinBox,
     )
-    from PyQt5.QtCore import Qt, QDateTime, QEvent
-    from PyQt5.QtGui import QPalette, QColor, QFont, QIcon
+    from PyQt5.QtCore import Qt, QDateTime, QEvent, QThread, pyqtSignal as Signal
+    from PyQt5.QtGui import QPalette, QColor, QFont, QIcon, QPainter, QPen
 
 from config import load_config, save_config
 from data_loader import DataLoader
@@ -39,6 +39,89 @@ from report_generator import generate_report
 from db import Database
 from ai_analyzer import AIAnalyzer
 from stats_panel import StatsPanel
+
+
+# ============================================================
+# 加载遮罩 & 后台加载线程
+# ============================================================
+
+class LoadingOverlay(QWidget):
+    """居中半透明加载遮罩，带旋转点动画。"""
+
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+        self.setFixedSize(parent.size())
+        self._dots = 0
+        self._base_text = "正在载入数据"
+
+        # 半透明黑色背景
+        self.setAutoFillBackground(True)
+        pal = self.palette()
+        pal.setColor(self.backgroundRole(), QColor(0, 0, 0, 160))
+        self.setPalette(pal)
+
+        # 动画定时器
+        self._timer = self.startTimer(400)
+
+    def timerEvent(self, event):
+        self._dots = (self._dots + 1) % 4
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        # 半透明背景（paintEvent 里再画一层确保覆盖）
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 160))
+
+        # 文字
+        dots = "." * self._dots
+        text = f"{self._base_text}{dots}"
+        font = QFont("Microsoft YaHei", 18, QFont.Bold)
+        painter.setFont(font)
+        painter.setPen(QPen(QColor(255, 255, 255, 230)))
+        painter.drawText(self.rect(), Qt.AlignCenter, text)
+        painter.end()
+
+    def set_text(self, text: str):
+        self._base_text = text
+        self.update()
+
+    def cleanup(self):
+        self.killTimer(self._timer)
+
+
+class LoadWorker(QThread):
+    """后台线程：执行扫描选股 + 指标计算。"""
+    status = Signal(str)       # 进度文字
+    finished_ok = Signal(object, object, object, int)  # df, stock_code, hub, warmup
+    finished_err = Signal(str)  # 错误信息
+
+    def __init__(self, data_loader, days, ma_periods, config):
+        super().__init__()
+        self.data_loader = data_loader
+        self.days = days
+        self.ma_periods = ma_periods
+        self.config = config
+
+    def run(self):
+        try:
+            self.status.emit("正在扫描股票数据…")
+            stocks = self.data_loader.scan_stocks()
+            self.status.emit(f"扫描到 {len(stocks)} 只股票，正在选股…")
+
+            df, stock_code = self.data_loader.random_pick(self.days, self.ma_periods)
+            self.status.emit(f"已选中 {stock_code}，正在计算指标…")
+
+            config = dict(self.config)
+            config["ma_periods"] = self.ma_periods
+            hub = IndicatorHub(df, config)
+            hub.calculate_all()
+            warmup = hub.get_min_warmup()
+
+            self.finished_ok.emit(df, stock_code, hub, warmup)
+        except Exception as e:
+            self.finished_err.emit(str(e))
 
 
 class MainWindow(QMainWindow):
@@ -67,6 +150,7 @@ class MainWindow(QMainWindow):
         self.stock_code = ""        # 当前股票代码
         self.training_active = False
         self.min_warmup = 30        # 指标预热最小根数
+        self._loading_overlay = None  # 加载遮罩
 
         # ---- 数据库 & AI ----
         self.db = Database()
@@ -105,6 +189,13 @@ class MainWindow(QMainWindow):
         palette.setColor(QPalette.Highlight, QColor("#4a9eff"))
         palette.setColor(QPalette.HighlightedText, QColor("#000000"))
         QApplication.instance().setPalette(palette)
+
+    # ============================================================
+    def resizeEvent(self, event):
+        """窗口大小变化时同步遮罩尺寸。"""
+        super().resizeEvent(event)
+        if self._loading_overlay:
+            self._loading_overlay.setFixedSize(self.centralWidget().size())
 
     # ============================================================
     # 快捷键事件过滤器
@@ -547,7 +638,11 @@ class MainWindow(QMainWindow):
     # 训练控制
     # ============================================================
     def start_training(self):
-        """开始新的训练会话。"""
+        """开始新的训练会话（后台加载 + 遮罩动画）。"""
+        # 防止重复点击
+        if hasattr(self, '_loading_overlay') and self._loading_overlay is not None:
+            return
+
         # 检查数据加载器
         if not self.data_loader or not self.data_loader.is_available():
             path = self.tdx_path_edit.text().strip()
@@ -564,7 +659,7 @@ class MainWindow(QMainWindow):
                 )
                 return
 
-        # 保存 AI 配置（用户可能在训练前修改了设置）
+        # 保存 AI 配置
         self._save_ai_config()
 
         # 重置状态
@@ -577,44 +672,68 @@ class MainWindow(QMainWindow):
         self.trade_manager.set_stop_loss(-sl_pct / 100.0 if sl_pct > 0 else None)
         self.trade_manager.set_take_profit(tp_pct / 100.0 if tp_pct > 0 else None)
 
-        try:
-            # 扫描并随机选股
-            self.log("🔍 正在扫描股票数据...")
-            stocks = self.data_loader.scan_stocks()
-            self.log(f"📊 共扫描到 {len(stocks)} 只股票")
+        ma_periods = self._parse_ma_periods()
+        self.config["ma_periods"] = ma_periods
 
-            self.log(f"🎰 随机选取 {days} 天训练数据...")
-            ma_periods = self._parse_ma_periods()
-            self.df, self.stock_code = self.data_loader.random_pick(days, ma_periods)
-            self.log(f"✅ 选中: {self.stock_code}, 数据量: {len(self.df)} 根K线")
+        # 显示遮罩
+        self._loading_overlay = LoadingOverlay(self.centralWidget())
+        self._loading_overlay.show()
+        self._loading_overlay.raise_()
 
-            # 计算所有指标
-            ma_periods = self._parse_ma_periods()
-            self.config["ma_periods"] = ma_periods
-            self.indicator_hub = IndicatorHub(self.df, self.config)
-            self.indicator_hub.calculate_all()
-            self.log("📈 指标计算完成")
+        # 启动后台线程
+        self._load_worker = LoadWorker(
+            self.data_loader, days, ma_periods, self.config
+        )
+        self._load_worker.status.connect(self._on_load_status)
+        self._load_worker.finished_ok.connect(self._on_load_done)
+        self._load_worker.finished_err.connect(self._on_load_error)
+        self._load_worker.start()
 
-            # 设置初始推演位置
-            self.min_warmup = self.indicator_hub.get_min_warmup()
-            self.cursor = self.min_warmup
+    def _on_load_status(self, text: str):
+        """后台加载进度回调。"""
+        self.log(f"🔍 {text}")
+        if self._loading_overlay:
+            self._loading_overlay.set_text(text)
 
-            # 设置画布数据
-            self.chart.set_data(self.df, self.indicator_hub, self.trade_manager)
-            self.chart.setup_panels(self.spin_panel_count.value())
-            overlays = self._get_enabled_overlays()
-            sub_inds = self._get_sub_indicators()
-            self.chart.render(self.cursor, sub_inds, overlays)
+    def _on_load_done(self, df, stock_code, hub, warmup):
+        """后台加载完成回调。"""
+        self._hide_loading()
 
-            self.training_active = True
-            self.log(f"🎮 训练开始! 当前可见 {self.cursor}/{len(self.df)} 根K线")
-            self.statusBar().showMessage(
-                f"训练中 | {self.stock_code} | 进度: {self.cursor}/{len(self.df)} | 仓位: 0%"
-            )
+        self.df = df
+        self.stock_code = stock_code
+        self.indicator_hub = hub
+        self.min_warmup = warmup
+        self.cursor = warmup
 
-        except Exception as e:
-            self.log(f"❌ 启动训练失败: {e}")
-            QMessageBox.critical(self, "启动失败", str(e))
+        self.log(f"✅ 选中: {stock_code}, 数据量: {len(df)} 根K线")
+        self.log("📈 指标计算完成")
+
+        # 设置画布数据
+        self.chart.set_data(self.df, self.indicator_hub, self.trade_manager)
+        self.chart.setup_panels(self.spin_panel_count.value())
+        overlays = self._get_enabled_overlays()
+        sub_inds = self._get_sub_indicators()
+        self.chart.render(self.cursor, sub_inds, overlays)
+
+        self.training_active = True
+        self.log(f"🎮 训练开始! 当前可见 {self.cursor}/{len(self.df)} 根K线")
+        self.statusBar().showMessage(
+            f"训练中 | {self.stock_code} | 进度: {self.cursor}/{len(self.df)} | 仓位: 0%"
+        )
+
+    def _on_load_error(self, err_msg: str):
+        """后台加载失败回调。"""
+        self._hide_loading()
+        self.log(f"❌ 启动训练失败: {err_msg}")
+        QMessageBox.critical(self, "启动失败", err_msg)
+
+    def _hide_loading(self):
+        """隐藏并销毁加载遮罩。"""
+        if self._loading_overlay:
+            self._loading_overlay.cleanup()
+            self._loading_overlay.hide()
+            self._loading_overlay.deleteLater()
+            self._loading_overlay = None
 
     def next_day(self):
         """推演下一天（→键）。"""
@@ -956,6 +1075,10 @@ class MainWindow(QMainWindow):
         """均线周期输入框编辑完成回调。"""
         periods = self._parse_ma_periods()
         self.edit_ma_periods.setText(",".join(str(p) for p in periods))
+        self.config["ma_periods"] = periods
+        if self.indicator_hub is not None:
+            self.indicator_hub.ma_periods = periods
+            self.indicator_hub.calculate_all()
         if self.training_active or self.df is not None:
             self._refresh_chart()
 

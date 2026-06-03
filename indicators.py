@@ -230,6 +230,10 @@ class IndicatorHub:
                 self.results[name] = {}
 
         # ---- 计算主图叠加指标 ----
+        # 清除旧的动态均线数据，避免周期变更后残留
+        old_ma_keys = [k for k in self.main_overlays if k.startswith("MA") and k[2:].isdigit()]
+        for k in old_ma_keys:
+            del self.main_overlays[k]
         # 动态均线：根据配置的 ma_periods 计算每条 MA
         for p in self.ma_periods:
             try:
