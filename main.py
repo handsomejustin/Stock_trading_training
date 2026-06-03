@@ -17,7 +17,7 @@ try:
         QFileDialog, QGroupBox, QStatusBar, QCheckBox,
         QMessageBox, QSplitter,
     )
-    from PySide6.QtCore import Qt, QDateTime
+    from PySide6.QtCore import Qt, QDateTime, QEvent
     from PySide6.QtGui import QPalette, QColor, QFont, QIcon
 except ImportError:
     from PyQt5.QtWidgets import (
@@ -26,7 +26,7 @@ except ImportError:
         QFileDialog, QGroupBox, QStatusBar, QCheckBox,
         QMessageBox, QSplitter,
     )
-    from PyQt5.QtCore import Qt, QDateTime
+    from PyQt5.QtCore import Qt, QDateTime, QEvent
     from PyQt5.QtGui import QPalette, QColor, QFont, QIcon
 
 from config import load_config, save_config
@@ -147,8 +147,17 @@ class MainWindow(QMainWindow):
     def _build_right_panel(self) -> QWidget:
         """构建右侧控制面板。"""
         panel = QWidget()
-        panel.setMaximumWidth(350)
-        panel.setMinimumWidth(250)
+        panel.setMaximumWidth(380)
+        panel.setMinimumWidth(280)
+        panel.setStyleSheet("""
+            QLabel { font-size: 13px; }
+            QComboBox { font-size: 13px; padding: 2px 4px; }
+            QSpinBox { font-size: 13px; padding: 2px 4px; }
+            QLineEdit { font-size: 13px; padding: 2px 4px; }
+            QPushButton { font-size: 13px; }
+            QGroupBox { font-size: 14px; font-weight: bold; }
+            QCheckBox { font-size: 13px; }
+        """)
         layout = QVBoxLayout(panel)
         layout.setSpacing(6)
 
@@ -161,7 +170,7 @@ class MainWindow(QMainWindow):
             "↑ 买入  |  ↓ 卖出  |  Esc 结束训练"
         )
         keys_label = QLabel(keys_text)
-        keys_label.setStyleSheet("color: #aaaaaa; font-size: 11px;")
+        keys_label.setStyleSheet("color: #aaaaaa; font-size: 13px;")
         keys_label.setWordWrap(True)
         keys_layout.addWidget(keys_label)
         layout.addWidget(keys_group)
@@ -284,7 +293,7 @@ class MainWindow(QMainWindow):
                 background-color: #1a1a1a;
                 color: #cccccc;
                 font-family: Consolas, 'Courier New', monospace;
-                font-size: 12px;
+                font-size: 14px;
                 border: 1px solid #3c3c3c;
             }
         """)
@@ -664,7 +673,7 @@ class MainWindow(QMainWindow):
         这些控件会拦截按键事件，导致 MainWindow.keyPressEvent 收不到。
         此过滤器拦截关键快捷键，直接交给 _handle_key 处理。
         """
-        if event.type() == event.KeyPress:
+        if event.type() == QEvent.Type.KeyPress:
             key = event.key()
             # 仅拦截训练相关的快捷键，其他按键交给控件自行处理
             if key in (Qt.Key_Right, Qt.Key_Left, Qt.Key_PageDown,
@@ -717,7 +726,7 @@ def main():
     window = MainWindow()
     window.show()
 
-    sys.exit(app.exec_() if hasattr(app, 'exec_') else app.exec())
+    sys.exit(app.exec() if hasattr(app, 'exec') else app.exec_())
 
 
 if __name__ == "__main__":
