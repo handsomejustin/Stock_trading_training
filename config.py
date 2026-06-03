@@ -18,7 +18,9 @@ _DEFAULT_CONFIG = {
     "training_days": 120,
     "panel_count": 3,
     "default_sub_indicators": ["MACD", "KDJ", "RSI", "CCI", "BIAS"],
-    "default_main_overlays": ["MA5", "MA20"],
+    "default_main_overlays": ["MA"],
+    "ma_periods": [5, 10, 20, 30, 60, 120],   # 主图均线周期（最多 6 条）
+    "ma_enabled": True,                         # 是否显示均线
     "ai": {
         "provider": "",       # openai / anthropic / deepseek / custom
         "api_key": "",

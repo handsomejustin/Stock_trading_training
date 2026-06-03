@@ -157,6 +157,9 @@ class IndicatorHub:
     这样推演时无需重算，切换指标也只更换绘图数据。
     """
 
+    # 均线默认配色（最多 6 条）
+    MA_COLORS = ["#FFD700", "#FF69B4", "#00BFFF", "#FFA500", "#FF4500", "#ADFF2F"]
+
     def __init__(self, df: pd.DataFrame, config: dict):
         """
         初始化指标计算中心。
@@ -167,6 +170,8 @@ class IndicatorHub:
         """
         self.df = df
         self.config = config.get("indicators", {})
+        self.app_config = config                    # 保留完整配置（含 ma_periods）
+        self.ma_periods: list[int] = config.get("ma_periods", [5, 10, 20, 30, 60, 120])
         self.results: dict[str, dict] = {}       # 副图指标缓存
         self.main_overlays: dict[str, np.ndarray] = {}  # 主图叠加缓存
 
@@ -225,11 +230,12 @@ class IndicatorHub:
                 self.results[name] = {}
 
         # ---- 计算主图叠加指标 ----
-        try:
-            self.main_overlays["MA5"] = MA(close, 5)
-            self.main_overlays["MA20"] = MA(close, 20)
-        except Exception:
-            pass
+        # 动态均线：根据配置的 ma_periods 计算每条 MA
+        for p in self.ma_periods:
+            try:
+                self.main_overlays[f"MA{p}"] = MA(close, p)
+            except Exception:
+                pass
 
         try:
             ema1, ema2 = EXPMA(close, **self.config.get("EXPMA", {"N1": 12, "N2": 50}))
@@ -273,53 +279,68 @@ class IndicatorHub:
         获取主图叠加线的绘图数据。
 
         Args:
-            enabled: 启用的叠加指标名称列表（如 ["MA5", "MA20"]）
+            enabled: 启用的叠加指标名称列表（如 ["MA", "BOLL"]）
 
         Returns:
             list[dict]: 每条线的 {name, array, color, linewidth}
         """
-        # 定义所有可用的主图叠加线
-        overlay_defs = {
-            "MA5":    {"key": "MA5",    "color": "#FFD700", "linewidth": 1.0, "label": "MA5"},
-            "MA20":   {"key": "MA20",   "color": "#FF69B4", "linewidth": 1.0, "label": "MA20"},
-            "EXPMA":  {"key": "EXPMA12","color": "#00BFFF", "linewidth": 1.0, "label": "EXPMA12"},
-            "BBI":    {"key": "BBI",    "color": "#FFA500", "linewidth": 1.0, "label": "BBI"},
-            "BOLL":   {"key": "BOLL_UPPER", "color": "#888888", "linewidth": 0.8, "label": "BOLL"},
-        }
-
         lines = []
+
         for name in enabled:
-            if name in overlay_defs:
-                defn = overlay_defs[name]
-                arr = self.main_overlays.get(defn["key"])
+            if name == "MA":
+                # 动态均线：遍历所有配置的周期
+                for i, p in enumerate(self.ma_periods):
+                    key = f"MA{p}"
+                    arr = self.main_overlays.get(key)
+                    if arr is not None:
+                        color = self.MA_COLORS[i % len(self.MA_COLORS)]
+                        lines.append({
+                            "name": key,
+                            "array": arr,
+                            "color": color,
+                            "linewidth": 1.0,
+                        })
+            elif name == "EXPMA":
+                arr = self.main_overlays.get("EXPMA12")
                 if arr is not None:
                     lines.append({
-                        "name": defn["label"],
+                        "name": "EXPMA12",
                         "array": arr,
-                        "color": defn["color"],
-                        "linewidth": defn["linewidth"],
+                        "color": "#00BFFF",
+                        "linewidth": 1.0,
                     })
-                    # BOLL 需要画三条线（上轨、中轨、下轨）
-                    if name == "BOLL":
-                        for suffix, lbl in [("_MID", "MID"), ("_LOWER", "LOWER")]:
-                            arr_boll = self.main_overlays.get(f"BOLL{suffix}")
-                            if arr_boll is not None:
-                                lines.append({
-                                    "name": f"BOLL_{lbl}",
-                                    "array": arr_boll,
-                                    "color": "#888888",
-                                    "linewidth": 0.8,
-                                })
-                    # EXPMA 画两条线
-                    if name == "EXPMA":
-                        arr_expma50 = self.main_overlays.get("EXPMA50")
-                        if arr_expma50 is not None:
-                            lines.append({
-                                "name": "EXPMA50",
-                                "array": arr_expma50,
-                                "color": "#FF4500",
-                                "linewidth": 1.0,
-                            })
+                arr2 = self.main_overlays.get("EXPMA50")
+                if arr2 is not None:
+                    lines.append({
+                        "name": "EXPMA50",
+                        "array": arr2,
+                        "color": "#FF4500",
+                        "linewidth": 1.0,
+                    })
+            elif name == "BBI":
+                arr = self.main_overlays.get("BBI")
+                if arr is not None:
+                    lines.append({
+                        "name": "BBI",
+                        "array": arr,
+                        "color": "#FFA500",
+                        "linewidth": 1.0,
+                    })
+            elif name == "BOLL":
+                for key, lbl, clr in [
+                    ("BOLL_UPPER", "BOLL_UPPER", "#888888"),
+                    ("BOLL_MID", "BOLL_MID", "#888888"),
+                    ("BOLL_LOWER", "BOLL_LOWER", "#888888"),
+                ]:
+                    arr = self.main_overlays.get(key)
+                    if arr is not None:
+                        lines.append({
+                            "name": lbl,
+                            "array": arr,
+                            "color": clr,
+                            "linewidth": 0.8,
+                        })
+
         return lines
 
     def get_min_warmup(self) -> int:
@@ -327,12 +348,11 @@ class IndicatorHub:
         计算指标预热所需的最小 K 线根数。
 
         确保 EMA/SMA 类指标在第一个可见位置已有有效值。
-        取所有相关周期的最大值。
+        取最长均线周期、MACD LONG=26、BOLL N=20 等的最大值。
 
         Returns:
             int: 预热根数（cursor 初始值）
         """
-        # MACD 的 LONG=26 是最大的单周期需求
-        # BOLL N=20, BBI M4=20, MA20=20
-        # 取安全值 30，确保所有指标都有效
-        return 30
+        max_ma = max(self.ma_periods) if self.ma_periods else 30
+        # MACD LONG=26, BOLL N=20, BBI M4=20 都不超过 max_ma
+        return max(30, max_ma)

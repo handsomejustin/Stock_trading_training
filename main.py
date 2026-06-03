@@ -283,26 +283,46 @@ class MainWindow(QMainWindow):
         self._update_combo_visibility()
 
         # 主图叠加指标
-        overlay_layout = QHBoxLayout()
-        overlay_layout.addWidget(QLabel("主图叠加:"))
-        self.chk_ma5 = QCheckBox("MA5")
-        self.chk_ma5.setChecked("MA5" in self.config.get("default_main_overlays", []))
-        overlay_layout.addWidget(self.chk_ma5)
-        self.chk_ma20 = QCheckBox("MA20")
-        self.chk_ma20.setChecked("MA20" in self.config.get("default_main_overlays", []))
-        overlay_layout.addWidget(self.chk_ma20)
+        overlay_layout = QVBoxLayout()
+
+        # 均线周期配置行
+        ma_row = QHBoxLayout()
+        self.chk_ma = QCheckBox("均线")
+        self.chk_ma.setChecked(self.config.get("ma_enabled", True))
+        self.chk_ma.stateChanged.connect(self._on_overlay_changed)
+        ma_row.addWidget(self.chk_ma)
+
+        ma_row.addWidget(QLabel("周期:"))
+        self.edit_ma_periods = QLineEdit()
+        default_periods = self.config.get("ma_periods", [5, 10, 20, 30, 60, 120])
+        self.edit_ma_periods.setText(",".join(str(p) for p in default_periods))
+        self.edit_ma_periods.setPlaceholderText("如: 5,10,20,30,60,120")
+        self.edit_ma_periods.setToolTip(
+            "均线周期，逗号分隔，最多6条\n"
+            "默认: 5,10,20,30,60,120"
+        )
+        self.edit_ma_periods.editingFinished.connect(self._on_ma_periods_changed)
+        ma_row.addWidget(self.edit_ma_periods, stretch=1)
+        overlay_layout.addLayout(ma_row)
+
+        # 其他叠加指标行
+        other_overlay_row = QHBoxLayout()
+        other_overlay_row.addWidget(QLabel("叠加:"))
         self.chk_bbi = QCheckBox("BBI")
         self.chk_bbi.setChecked(False)
-        overlay_layout.addWidget(self.chk_bbi)
+        other_overlay_row.addWidget(self.chk_bbi)
         self.chk_expma = QCheckBox("EXPMA")
         self.chk_expma.setChecked(False)
-        overlay_layout.addWidget(self.chk_expma)
+        other_overlay_row.addWidget(self.chk_expma)
         self.chk_boll = QCheckBox("BOLL")
         self.chk_boll.setChecked(False)
-        overlay_layout.addWidget(self.chk_boll)
+        other_overlay_row.addWidget(self.chk_boll)
 
-        for chk in [self.chk_ma5, self.chk_ma20, self.chk_bbi, self.chk_expma, self.chk_boll]:
+        for chk in [self.chk_bbi, self.chk_expma, self.chk_boll]:
             chk.stateChanged.connect(self._on_overlay_changed)
+
+        other_overlay_row.addStretch()
+        overlay_layout.addLayout(other_overlay_row)
 
         config_layout.addLayout(overlay_layout)
 
@@ -564,10 +584,13 @@ class MainWindow(QMainWindow):
             self.log(f"📊 共扫描到 {len(stocks)} 只股票")
 
             self.log(f"🎰 随机选取 {days} 天训练数据...")
-            self.df, self.stock_code = self.data_loader.random_pick(days)
+            ma_periods = self._parse_ma_periods()
+            self.df, self.stock_code = self.data_loader.random_pick(days, ma_periods)
             self.log(f"✅ 选中: {self.stock_code}, 数据量: {len(self.df)} 根K线")
 
             # 计算所有指标
+            ma_periods = self._parse_ma_periods()
+            self.config["ma_periods"] = ma_periods
             self.indicator_hub = IndicatorHub(self.df, self.config)
             self.indicator_hub.calculate_all()
             self.log("📈 指标计算完成")
@@ -604,6 +627,8 @@ class MainWindow(QMainWindow):
             self.trade_manager.update_floating(row["high"], row["low"])
             # 检查止损止盈
             self._check_sl_tp()
+            # 跟随最新 bar
+            self.chart.scroll_to_latest(self.cursor)
             self._refresh_chart()
             self.statusBar().showMessage(
                 f"训练中 | {self.stock_code} | 进度: {self.cursor}/{len(self.df)} | "
@@ -642,6 +667,7 @@ class MainWindow(QMainWindow):
                 if trigger:
                     self._execute_auto_exit(trigger, self.cursor - 1, row)
                     break  # 自动退出后停止推进
+        self.chart.scroll_to_latest(self.cursor)
         self._refresh_chart()
         self.statusBar().showMessage(
             f"训练中 | {self.stock_code} | 进度: {self.cursor}/{len(self.df)} | "
@@ -695,6 +721,7 @@ class MainWindow(QMainWindow):
 
         # 显示全部 K 线
         self.cursor = len(self.df)
+        self.chart.show_all(self.cursor)
         self._refresh_chart()
 
         # 计算时机评分
@@ -898,10 +925,8 @@ class MainWindow(QMainWindow):
     def _get_enabled_overlays(self) -> list:
         """获取当前启用的主图叠加指标列表。"""
         overlays = []
-        if self.chk_ma5.isChecked():
-            overlays.append("MA5")
-        if self.chk_ma20.isChecked():
-            overlays.append("MA20")
+        if self.chk_ma.isChecked():
+            overlays.append("MA")
         if self.chk_bbi.isChecked():
             overlays.append("BBI")
         if self.chk_expma.isChecked():
@@ -909,6 +934,30 @@ class MainWindow(QMainWindow):
         if self.chk_boll.isChecked():
             overlays.append("BOLL")
         return overlays
+
+    def _parse_ma_periods(self) -> list[int]:
+        """解析均线周期输入框，返回有效的周期列表。"""
+        text = self.edit_ma_periods.text().strip()
+        periods = []
+        for part in text.replace("，", ",").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                p = int(part)
+                if 1 <= p <= 250:
+                    periods.append(p)
+            except ValueError:
+                continue
+        # 最多 6 条
+        return periods[:6] if periods else [5, 10, 20, 30, 60, 120]
+
+    def _on_ma_periods_changed(self):
+        """均线周期输入框编辑完成回调。"""
+        periods = self._parse_ma_periods()
+        self.edit_ma_periods.setText(",".join(str(p) for p in periods))
+        if self.training_active or self.df is not None:
+            self._refresh_chart()
 
     # ============================================================
     # 配置保存

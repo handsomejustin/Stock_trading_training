@@ -71,11 +71,22 @@ class ChartCanvas(FigureCanvasQTAgg):
         self.cross_vlines = []
         self.cross_hlines = []
 
+        # ---- 拖拽 / 缩放状态 ----
+        self._view_start: int = 0       # 可见窗口起始 bar 索引
+        self._view_count: int = 80      # 可见窗口宽度（K 线根数）
+        self._dragging: bool = False    # 是否正在拖拽
+        self._drag_start_x: float = 0   # 拖拽起始 x 像素
+        self._drag_start_xlim: tuple = (0, 80)  # 拖拽起始 xlim
+        self._cursor: int = 0           # 当前推演位置（最新 bar 数）
+
         # 创建子图
         self._build_panels(panel_count)
 
         # 绑定鼠标事件
+        self.mpl_connect("button_press_event", self._on_mouse_press)
+        self.mpl_connect("button_release_event", self._on_mouse_release)
         self.mpl_connect("motion_notify_event", self._on_mouse_move)
+        self.mpl_connect("scroll_event", self._on_scroll)
 
         self.draw()
 
@@ -178,8 +189,59 @@ class ChartCanvas(FigureCanvasQTAgg):
             self.cross_vlines.append(vl)
             self.cross_hlines.append(hl)
 
+    # ============================================================
+    # 鼠标事件：拖拽 + 十字光标 + 滚轮缩放
+    # ============================================================
+    def _on_mouse_press(self, event):
+        """鼠标按下：记录拖拽起点。"""
+        if event.button == 1 and event.inaxes is not None:
+            self._dragging = True
+            self._drag_start_x = event.x
+            self._drag_start_xlim = self.ax_kline.get_xlim()
+
+    def _on_mouse_release(self, event):
+        """鼠标松开：结束拖拽。"""
+        if event.button == 1:
+            self._dragging = False
+
     def _on_mouse_move(self, event):
-        """鼠标移动时更新十字光标位置。"""
+        """鼠标移动：拖拽时平移视图，否则更新十字光标。"""
+        if self._dragging and event.x is not None:
+            # ---- 拖拽平移 ----
+            dx_pixels = event.x - self._drag_start_x
+            # 将像素偏移转为数据坐标偏移
+            xlim = self._drag_start_xlim
+            x_range = xlim[1] - xlim[0]
+            if x_range <= 0:
+                return
+            fig_w = self.fig.get_figwidth() * self.fig.dpi
+            # 估算 axes 占 figure 的宽度比例
+            bbox = self.ax_kline.get_position()
+            ax_w_frac = bbox.width
+            ax_w_pixels = fig_w * ax_w_frac
+            if ax_w_pixels <= 0:
+                return
+            dx_data = -dx_pixels / ax_w_pixels * x_range
+
+            new_left = xlim[0] + dx_data
+            new_right = xlim[1] + dx_data
+            # 限制边界
+            new_left = max(-1, new_left)
+            new_right = max(new_right, new_left + 10)
+            self.ax_kline.set_xlim(new_left, new_right)
+            # 同步 _view_start
+            self._view_start = max(0, int(new_left + 0.5))
+            self._view_count = int(new_right - new_left)
+
+            # 隐藏十字光标
+            for vl in self.cross_vlines:
+                vl.set_visible(False)
+            for hl in self.cross_hlines:
+                hl.set_visible(False)
+            self.draw_idle()
+            return
+
+        # ---- 十字光标 ----
         if event.inaxes is None:
             return
 
@@ -204,6 +266,52 @@ class ChartCanvas(FigureCanvasQTAgg):
 
         self.draw_idle()
 
+    def _on_scroll(self, event):
+        """滚轮缩放：以鼠标位置为中心调整可见 K 线数量。"""
+        if event.inaxes is None:
+            return
+
+        xlim = self.ax_kline.get_xlim()
+        cur_left, cur_right = xlim
+        cur_count = cur_right - cur_left
+        if cur_count <= 0:
+            return
+
+        # 鼠标在当前视图中的相对位置（0~1）
+        mouse_ratio = (event.xdata - cur_left) / cur_count
+
+        # 缩放因子
+        if event.button == "up":
+            factor = 0.85   # 放大（减少可见 K 线）
+        elif event.button == "down":
+            factor = 1.18   # 缩小（增加可见 K 线）
+        else:
+            return
+
+        new_count = cur_count * factor
+        new_count = max(20, min(new_count, self._cursor + 2))  # 20~全部
+        if new_count >= self._cursor + 2:
+            # 显示全部
+            new_left = -1
+            new_right = self._cursor
+        else:
+            # 以鼠标位置为中心缩放
+            new_left = event.xdata - mouse_ratio * new_count
+            new_right = new_left + new_count
+            # 边界限制
+            if new_left < -1:
+                new_left = -1
+                new_right = new_left + new_count
+            if new_right > self._cursor:
+                new_right = self._cursor
+                new_left = new_right - new_count
+                new_left = max(-1, new_left)
+
+        self._view_start = max(0, int(new_left + 0.5))
+        self._view_count = int(new_count)
+        self.ax_kline.set_xlim(new_left, new_right)
+        self.draw_idle()
+
     # ============================================================
     # 数据与渲染
     # ============================================================
@@ -212,11 +320,42 @@ class ChartCanvas(FigureCanvasQTAgg):
         self.df = df
         self.indicator_hub = indicator_hub
         self.trade_manager = trade_manager
+        # 重置视口
+        self._view_start = 0
+        self._view_count = min(80, len(df))
+        self._cursor = 0
+
+    def scroll_to_latest(self, cursor: int):
+        """
+        将视图窗口滚动到最新 bar 位置。
+
+        在推演前进时调用，确保用户始终看到最新 K 线。
+
+        Args:
+            cursor: 当前推演位置
+        """
+        if cursor <= self._view_count:
+            self._view_start = 0
+        else:
+            self._view_start = cursor - self._view_count
+
+    def show_all(self, cursor: int):
+        """
+        显示全部 K 线（训练结束时调用）。
+
+        Args:
+            cursor: 总 bar 数量
+        """
+        self._view_start = 0
+        self._view_count = cursor
 
     def render(self, cursor: int, sub_indicators: list = None,
                main_overlays: list = None):
         """
         核心渲染方法：绘制可见切片的所有内容。
+
+        渲染全部 0..cursor 的 K 线数据，通过 xlim 控制可见窗口。
+        拖拽/缩放只改变 xlim，不重新绘制。
 
         Args:
             cursor: 当前推演位置（可见的K线数量）
@@ -227,12 +366,13 @@ class ChartCanvas(FigureCanvasQTAgg):
             return
 
         cursor = min(cursor, len(self.df))
+        self._cursor = cursor
 
         # 默认指标列表
         if sub_indicators is None:
             sub_indicators = ["MACD"] * self.panel_count
 
-        # 可见切片
+        # 可见切片：绘制全部 0..cursor
         vis = self.df.iloc[:cursor].reset_index(drop=True)
         n = len(vis)
 
@@ -358,6 +498,13 @@ class ChartCanvas(FigureCanvasQTAgg):
                 labelcolor=self.COLOR_TEXT,
             )
 
+        # ---- 应用可见窗口（xlim） ----
+        view_end = min(self._view_start + self._view_count, cursor)
+        if view_end <= self._view_start:
+            view_end = cursor
+            self._view_start = 0
+        self.ax_kline.set_xlim(self._view_start - 1, view_end)
+
         # ---- 刷新十字光标 ----
         for vl in self.cross_vlines:
             vl.set_visible(False)
@@ -466,15 +613,21 @@ class ChartCanvas(FigureCanvasQTAgg):
         ax.set_ylabel(indicator_name, color=self.COLOR_TEXT, fontsize=8)
 
     def _set_date_labels(self, ax, vis: pd.DataFrame):
-        """设置 x 轴日期标签。"""
+        """设置 x 轴日期标签（基于可见窗口范围）。"""
         n = len(vis)
         if n <= 0:
             return
 
-        step = max(1, n // 10)
-        positions = list(range(0, n, step))
+        # 根据当前视口计算日期标签步长
+        view_left = max(0, int(self._view_start))
+        view_right = min(n, view_left + self._view_count)
+        view_n = view_right - view_left
+        if view_n <= 0:
+            return
+
+        step = max(1, view_n // 8)
+        positions = list(range(view_left, view_right, step))
         labels = [vis.iloc[i]["date"] for i in positions if i < n]
 
         ax.set_xticks(positions)
         ax.set_xticklabels(labels, rotation=30, fontsize=7, color=self.COLOR_TEXT)
-        ax.set_xlim(-1, n)

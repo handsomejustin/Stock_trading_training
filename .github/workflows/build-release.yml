@@ -121,6 +121,16 @@ jobs:
             WINDOWED_FLAG="--windowed"
           fi
 
+          # 按平台选择 Qt 绑定的 hidden-import，并排除另一个
+          QT_BINDING="${{ matrix.platform.qt-binding }}"
+          if [ "$QT_BINDING" = "pyside6" ]; then
+            QT_IMPORTS="--hidden-import PySide6.QtWidgets --hidden-import PySide6.QtCore --hidden-import PySide6.QtGui"
+            QT_EXCLUDES="--exclude PyQt5 --exclude PyQt5.QtWidgets --exclude PyQt5.QtCore --exclude PyQt5.QtGui"
+          else
+            QT_IMPORTS="--hidden-import PyQt5.QtWidgets --hidden-import PyQt5.QtCore --hidden-import PyQt5.QtGui"
+            QT_EXCLUDES="--exclude PySide6 --exclude PySide6.QtWidgets --exclude PySide6.QtCore --exclude PySide6.QtGui"
+          fi
+
           pyinstaller \
             --name "盘感训练器" \
             --noconfirm \
@@ -136,9 +146,8 @@ jobs:
             --hidden-import easy_tdx.offline.finders \
             --hidden-import easy_tdx.offline.block \
             --hidden-import easy_tdx.offline.gbbq \
-            --hidden-import PySide6.QtWidgets \
-            --hidden-import PySide6.QtCore \
-            --hidden-import PySide6.QtGui \
+            $QT_IMPORTS \
+            $QT_EXCLUDES \
             main.py
 
       # ──────────────────────────────────────

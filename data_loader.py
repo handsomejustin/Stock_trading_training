@@ -105,14 +105,18 @@ class DataLoader:
         self.stock_list = stocks
         return stocks
 
-    def random_pick(self, days: int = 120) -> tuple[pd.DataFrame, str]:
+    def random_pick(self, days: int = 120,
+                    ma_periods: list[int] | None = None) -> tuple[pd.DataFrame, str]:
         """
         随机选择一只股票，随机截取指定长度的历史数据。
 
-        包含额外的 50 根缓冲K线用于指标预热（EMA/SMA 等需要历史前缀）。
+        包含额外的缓冲K线用于指标预热（均线等需要历史前缀）。
+        缓冲量根据最长均线周期动态计算，至少保证总数据量 ≥ 250 根。
 
         Args:
             days: 训练天数（用户可见的部分）
+            ma_periods: 均线周期列表，用于确定预热缓冲量。
+                        为 None 时默认按 MA120 计算。
 
         Returns:
             tuple: (DataFrame, 股票代码字符串)
@@ -124,9 +128,13 @@ class DataLoader:
         if not self.stock_list:
             raise ValueError("未扫描到任何股票数据，请检查通达信数据目录")
 
-        # 需要的总长度：训练天数 + 指标预热缓冲
-        total_needed = days + 50
-        min_warmup = 26  # MACD LONG 参数，确保主要指标有有效值
+        # 根据最长均线周期计算缓冲量
+        if ma_periods:
+            max_ma = max(ma_periods)
+        else:
+            max_ma = 120
+        buffer = max(max_ma + 10, 130)  # 至少 130 根缓冲
+        total_needed = max(days + buffer, 250)  # 至少 250 根总量
 
         # 打乱顺序后逐一尝试，找到第一个足够长的股票
         candidates = list(self.stock_list)
