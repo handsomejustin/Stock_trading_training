@@ -898,6 +898,7 @@ class MainWindow(QMainWindow):
         # 设置画布数据
         self.chart.set_data(self.df, self.indicator_hub, self.trade_manager)
         self.chart.setup_panels(self.spin_panel_count.value())
+        self.chart.scroll_to_latest(self.cursor)
         overlays = self._get_enabled_overlays()
         sub_inds = self._get_sub_indicators()
         self.chart.render(self.cursor, sub_inds, overlays)

@@ -277,6 +277,11 @@ pyinstaller 盘感训练器.spec
 
 ## Changelog
 
+### v1.1.6 (2026-06-04)
+
+**Bug 修复：**
+- 训练开始后 K 线未自动滚动到当前位置：`_on_load_done` 中新增 `scroll_to_latest` 调用，确保视口对齐到 cursor 位置
+
 ### v1.1.5 (2026-06-03)
 
 **新功能：**
