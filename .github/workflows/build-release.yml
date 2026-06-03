@@ -136,7 +136,7 @@ jobs:
             --noconfirm \
             $WINDOWED_FLAG \
             --icon logo.ico \
-            --add-data "config.yaml${{ runner.os == 'Windows' && ';' || ':' }}." \
+            --add-data "config.example.yaml${{ runner.os == 'Windows' && ';' || ':' }}." \
             --add-data "logo.ico${{ runner.os == 'Windows' && ';' || ':' }}." \
             --hidden-import easy_tdx \
             --hidden-import easy_tdx.MyTT \
