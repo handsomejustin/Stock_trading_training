@@ -5,7 +5,8 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-*.spec
+# PyInstaller spec (auto-generated), but keep our project spec
+# *.spec
 
 # Virtual Environment
 venv/

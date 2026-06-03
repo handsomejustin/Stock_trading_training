@@ -57,7 +57,8 @@ def load_config() -> dict:
     """
     读取 config.yaml 配置文件。
 
-    如果文件不存在，使用默认配置并自动生成文件。
+    如果文件不存在，尝试从 config.example.yaml 复制。
+    如果 example 也不存在，使用硬编码默认配置并自动生成文件。
     如果文件存在但缺少某些字段，用默认值补全。
 
     Returns:
@@ -69,9 +70,18 @@ def load_config() -> dict:
         # 用默认值补全缺失字段
         return _merge_config(cfg, _DEFAULT_CONFIG)
     else:
-        # 配置文件不存在，创建默认配置文件
-        save_config(_DEFAULT_CONFIG)
-        return _DEFAULT_CONFIG.copy()
+        # config.yaml 不存在，尝试从 config.example.yaml 复制
+        example_path = Path(__file__).parent / "config.example.yaml"
+        if example_path.is_file():
+            import shutil
+            shutil.copy2(example_path, _CONFIG_PATH)
+            with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+            return _merge_config(cfg, _DEFAULT_CONFIG)
+        else:
+            # example 也没有，用硬编码默认配置生成
+            save_config(_DEFAULT_CONFIG)
+            return _DEFAULT_CONFIG.copy()
 
 
 def save_config(cfg: dict) -> None:
