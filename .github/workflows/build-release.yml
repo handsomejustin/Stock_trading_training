@@ -40,10 +40,6 @@ jobs:
             runner: macos-latest   # Apple Silicon (M1+)
             artifact: 盘感训练器-macos-arm64
             qt-binding: pyqt5
-          - name: macos-x86_64
-            runner: macos-13       # Intel
-            artifact: 盘感训练器-macos-x86_64
-            qt-binding: pyqt5
 
     steps:
       # ──────────────────────────────────────
@@ -226,7 +222,6 @@ jobs:
             | Linux x86_64 | `盘感训练器-linux-x86_64.tar.gz` |
             | Linux ARM64 | `盘感训练器-linux-arm64.tar.gz` |
             | macOS ARM (M1/M2/M3/M4) | `盘感训练器-macos-arm64.zip` |
-            | macOS Intel | `盘感训练器-macos-x86_64.zip` |
 
             ### 使用方法
             1. 下载对应平台的压缩包并解压
