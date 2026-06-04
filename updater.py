@@ -185,7 +185,7 @@ def apply_update(zip_path: str) -> None:
     bat_content = f"""@echo off
 chcp 65001 >nul
 echo ============================================
-echo   盘感训练器 自动升级
+echo   StockTraining Auto Update
 echo ============================================
 echo.
 

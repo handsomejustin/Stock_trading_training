@@ -20,25 +20,25 @@ jobs:
           # ── Windows ──
           - name: windows-x86_64
             runner: windows-latest
-            artifact: 盘感训练器-windows-x86_64
+            artifact: StockTraining-windows-x86_64
             qt-binding: pyqt5
           - name: windows-arm64
             runner: windows-11-arm
-            artifact: 盘感训练器-windows-arm64
+            artifact: StockTraining-windows-arm64
             qt-binding: pyside6
           # ── Linux ──
           - name: linux-x86_64
             runner: ubuntu-latest
-            artifact: 盘感训练器-linux-x86_64
+            artifact: StockTraining-linux-x86_64
             qt-binding: pyqt5
           - name: linux-arm64
             runner: ubuntu-24.04-arm
-            artifact: 盘感训练器-linux-arm64
+            artifact: StockTraining-linux-arm64
             qt-binding: pyside6
           # ── macOS ──
           - name: macos-arm64
             runner: macos-latest   # Apple Silicon (M1+)
-            artifact: 盘感训练器-macos-arm64
+            artifact: StockTraining-macos-arm64
             qt-binding: pyqt5
 
     steps:
@@ -128,7 +128,7 @@ jobs:
           fi
 
           pyinstaller \
-            --name "盘感训练器" \
+            --name "StockTraining" \
             --noconfirm \
             $WINDOWED_FLAG \
             --icon logo.ico \
@@ -153,7 +153,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $distDir = "dist/盘感训练器"
+          $distDir = "dist/StockTraining"
           $outFile = "${{ matrix.platform.artifact }}.zip"
           Compress-Archive -Path $distDir -DestinationPath $outFile
 
@@ -161,17 +161,17 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           cd dist
-          if [ -d "盘感训练器.app" ]; then
-            zip -r -9 "../${{ matrix.platform.artifact }}.zip" "盘感训练器.app"
+          if [ -d "StockTraining.app" ]; then
+            zip -r -9 "../${{ matrix.platform.artifact }}.zip" "StockTraining.app"
           else
-            zip -r -9 "../${{ matrix.platform.artifact }}.zip" "盘感训练器"
+            zip -r -9 "../${{ matrix.platform.artifact }}.zip" "StockTraining"
           fi
 
       - name: Package artifact (Linux)
         if: runner.os == 'Linux'
         run: |
           cd dist
-          tar czf "../${{ matrix.platform.artifact }}.tar.gz" "盘感训练器"
+          tar czf "../${{ matrix.platform.artifact }}.tar.gz" "StockTraining"
 
       # ──────────────────────────────────────
       # 7. 上传到 Actions Artifacts
@@ -217,17 +217,17 @@ jobs:
 
             | 平台 | 文件 |
             |------|------|
-            | Windows x86_64 | `盘感训练器-windows-x86_64.zip` |
-            | Windows ARM64 | `盘感训练器-windows-arm64.zip` |
-            | Linux x86_64 | `盘感训练器-linux-x86_64.tar.gz` |
-            | Linux ARM64 | `盘感训练器-linux-arm64.tar.gz` |
-            | macOS ARM (M1/M2/M3/M4) | `盘感训练器-macos-arm64.zip` |
+            | Windows x86_64 | `StockTraining-windows-x86_64.zip` |
+            | Windows ARM64 | `StockTraining-windows-arm64.zip` |
+            | Linux x86_64 | `StockTraining-linux-x86_64.tar.gz` |
+            | Linux ARM64 | `StockTraining-linux-arm64.tar.gz` |
+            | macOS ARM (M1/M2/M3/M4) | `StockTraining-macos-arm64.zip` |
 
             ### 使用方法
             1. 下载对应平台的压缩包并解压
-            2. Windows: 双击 `盘感训练器.exe`
-            3. macOS: 打开 `盘感训练器.app`（首次可能需要在系统设置中允许）
-            4. Linux: 运行 `./盘感训练器`
+            2. Windows: 双击 `StockTraining.exe`
+            3. macOS: 打开 `StockTraining.app`（首次可能需要在系统设置中允许）
+            4. Linux: 运行 `./StockTraining`
             5. 首次启动后选择通达信安装目录即可开始训练
 
             > 需要本地安装通达信客户端并提供日线数据文件。

@@ -1,6 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-
 a = Analysis(
     ['main.py'],
     pathex=[],
@@ -12,7 +11,6 @@ a = Analysis(
     runtime_hooks=[],
     excludes=['PySide6'],
     noarchive=False,
-    optimize=0,
 )
 pyz = PYZ(a.pure)
 
@@ -21,7 +19,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='盘感训练器',
+    name='StockTraining',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -41,5 +39,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='盘感训练器',
+    name='StockTraining',
 )
