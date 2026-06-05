@@ -38,6 +38,11 @@ _DEFAULT_CONFIG = {
         "auto_check": True,                          # 启动时自动检查
         "skip_version": "",                          # 跳过的版本号
     },
+    "mode": {
+        "current": "classic",         # classic / timed / multi_tf / sector / comprehensive
+        "timed_seconds": 10,          # 限时模式：每根K线秒数 (3/5/10/15/30)
+        "sector_peer_count": 3,       # 板块联动：同板块股票数 (1-5)
+    },
     "indicators": {
         "MACD": {"SHORT": 12, "LONG": 26, "M": 9},
         "KDJ": {"N": 9, "M1": 3, "M2": 3},

@@ -17,6 +17,7 @@ from easy_tdx.offline import (
     read_gbbq,
     resolve_vipdoc,
 )
+from easy_tdx.offline.daily_bar import find_daily_bar_file
 
 
 class DataLoader:
@@ -186,6 +187,162 @@ class DataLoader:
     def get_stock_count(self) -> int:
         """获取已扫描到的股票数量。"""
         return len(self.stock_list)
+
+    # ============================================================
+    # 指定股票加载
+    # ============================================================
+    def load_specific_stock(self, stock_code: str) -> pd.DataFrame:
+        """
+        根据股票代码加载完整日线数据。
+
+        Args:
+            stock_code: 如 "SH600519" 或 "SZ000001"
+
+        Returns:
+            pd.DataFrame: 前复权日线数据
+        """
+        prefix = stock_code[:2].upper()
+        code = stock_code[2:]
+        market = 1 if prefix == "SH" else 0
+
+        filepath = find_daily_bar_file(market, code, self.vipdoc)
+        if not filepath.is_file():
+            raise ValueError(f"股票数据文件不存在: {filepath}")
+
+        bars = read_daily_bars(filepath)
+        if not bars:
+            raise ValueError(f"股票 {stock_code} 无日线数据")
+
+        df = pd.DataFrame([{
+            "date": f"{b.year}-{b.month:02d}-{b.day:02d}",
+            "date_int": b.year * 10000 + b.month * 100 + b.day,
+            "open": float(b.open),
+            "high": float(b.high),
+            "low": float(b.low),
+            "close": float(b.close),
+            "volume": float(b.vol),
+        } for b in bars])
+
+        df = df.reset_index(drop=True)
+        df = self._apply_forward_adjust(df, prefix, code)
+
+        if "date_int" in df.columns:
+            df = df.drop(columns=["date_int"])
+
+        return df
+
+    # ============================================================
+    # 周线重采样
+    # ============================================================
+    @staticmethod
+    def resample_weekly(daily_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        将日线数据重采样为周线。
+
+        按自然周聚合（周五结束），生成 _daily_indices 列
+        记录每根周线对应的日线索引范围（用于 cursor 映射）。
+
+        Args:
+            daily_df: 日线 DataFrame（需含 date, open, high, low, close, volume）
+
+        Returns:
+            pd.DataFrame: 周线数据 + _daily_indices 列
+        """
+        df = daily_df.copy()
+        df["_orig_idx"] = range(len(df))
+        df["date_dt"] = pd.to_datetime(df["date"])
+
+        weekly_groups = df.groupby(pd.Grouper(key="date_dt", freq="W-FRI"))
+
+        rows = []
+        for _date, group in weekly_groups:
+            if group.empty:
+                continue
+            rows.append({
+                "date": _date.strftime("%Y-%m-%d"),
+                "open": group["open"].iloc[0],
+                "high": group["high"].max(),
+                "low": group["low"].min(),
+                "close": group["close"].iloc[-1],
+                "volume": group["volume"].sum(),
+                "_daily_indices": group["_orig_idx"].tolist(),
+            })
+
+        if not rows:
+            return pd.DataFrame(columns=["date", "open", "high", "low",
+                                          "close", "volume", "_daily_indices"])
+
+        result = pd.DataFrame(rows)
+        result = result.reset_index(drop=True)
+        return result
+
+    # ============================================================
+    # 板块联动
+    # ============================================================
+    def load_sector_peers(self, stock_code: str,
+                          peer_count: int = 3) -> list[tuple[str, pd.DataFrame]]:
+        """
+        加载同板块的其他股票数据。
+
+        Args:
+            stock_code: 当前股票代码 (如 "SH600519")
+            peer_count: 需要加载的同板块股票数量
+
+        Returns:
+            list of (stock_code_str, DataFrame) 元组
+        """
+        block_path = self._find_block_zs_path()
+        if block_path is None:
+            return []
+
+        try:
+            from easy_tdx.offline.block import read_block_dat
+            blocks = read_block_dat(block_path)
+        except Exception:
+            return []
+
+        code_digits = stock_code[2:]
+        sector_codes = None
+        sector_name = ""
+
+        for block in blocks:
+            if code_digits in block.codes:
+                sector_codes = block.codes
+                sector_name = block.name
+                break
+
+        if not sector_codes:
+            return []
+
+        candidates = [c for c in sector_codes if c != code_digits]
+        random.shuffle(candidates)
+
+        peers = []
+        for candidate_code in candidates:
+            if len(peers) >= peer_count:
+                break
+
+            prefix = "SH" if candidate_code.startswith("6") else "SZ"
+            full_code = f"{prefix}{candidate_code}"
+
+            try:
+                df = self.load_specific_stock(full_code)
+                if len(df) >= 50:
+                    peers.append((full_code, df))
+            except Exception:
+                continue
+
+        return peers
+
+    def _find_block_zs_path(self) -> Path | None:
+        """定位 block_zs.dat 行业板块数据文件。"""
+        candidates = [
+            self.tdx_home / "T0002" / "hq_cache" / "block_zs.dat",
+        ]
+        for p in candidates:
+            if p.is_file():
+                return p
+        return None
 
     # ============================================================
     # 前复权

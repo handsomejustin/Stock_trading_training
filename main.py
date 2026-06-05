@@ -43,6 +43,10 @@ from db import Database
 from ai_analyzer import AIAnalyzer
 from stats_panel import StatsPanel
 from updater import __version__, check_update, download_update, apply_update, UpdateInfo
+from timer_bar import TimerBar
+from multi_tf_canvas import MultiTFCanvas
+from sector_panel import SectorPanel
+from psychology_tracker import PsychologyTracker
 
 
 # ============================================================
@@ -193,6 +197,18 @@ class MainWindow(QMainWindow):
         self.training_active = False
         self.min_warmup = 30        # 指标预热最小根数
         self._loading_overlay = None  # 加载遮罩
+
+        # ---- 训练模式 ----
+        self.current_mode = self.config.get("mode", {}).get("current", "classic")
+        self.weekly_df = None
+        self.weekly_cursor = 0
+        self.sector_peers = []
+        self.sector_cursors = {}
+        self._mode_widgets = []
+        self.timer_bar: TimerBar = None
+        self.multi_tf_canvas: MultiTFCanvas = None
+        self.sector_panel: SectorPanel = None
+        self.psychology_tracker: PsychologyTracker = None
 
         # ---- 数据库 & AI ----
         self.db = Database()
@@ -405,9 +421,16 @@ class MainWindow(QMainWindow):
         # ---- 上部：图表 + 控制面板（水平分割） ----
         splitter = QSplitter(Qt.Horizontal)
 
-        # 左侧：图表画布
+        # 左侧：图表区域（可扩展模式组件）
+        left_container = QWidget()
+        self.left_chart_layout = QVBoxLayout(left_container)
+        self.left_chart_layout.setContentsMargins(0, 0, 0, 0)
+        self.left_chart_layout.setSpacing(2)
+
         self.chart = ChartCanvas(parent=self)
-        splitter.addWidget(self.chart)
+        self.left_chart_layout.addWidget(self.chart, stretch=1)
+
+        splitter.addWidget(left_container)
 
         # 右侧：Tab 面板
         right_panel = self._build_right_panel()
@@ -500,6 +523,54 @@ class MainWindow(QMainWindow):
         keys_label.setWordWrap(True)
         keys_layout.addWidget(keys_label)
         layout.addWidget(keys_group)
+
+        # ---- 训练模式 ----
+        mode_group = QGroupBox("🎯 训练模式")
+        mode_layout = QVBoxLayout(mode_group)
+
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("模式:"))
+        self.combo_mode = QComboBox()
+        self.combo_mode.addItems(["经典模式", "限时模式", "多周期模式", "板块联动", "综合训练"])
+        _mode_keys = ["classic", "timed", "multi_tf", "sector", "comprehensive"]
+        _mode_val = self.config.get("mode", {}).get("current", "classic")
+        if _mode_val in _mode_keys:
+            self.combo_mode.setCurrentIndex(_mode_keys.index(_mode_val))
+        self.combo_mode.currentIndexChanged.connect(self._on_mode_changed)
+        mode_row.addWidget(self.combo_mode, stretch=1)
+        mode_layout.addLayout(mode_row)
+
+        # 限时配置
+        self.timed_config_widget = QWidget()
+        timed_layout = QHBoxLayout(self.timed_config_widget)
+        timed_layout.setContentsMargins(0, 0, 0, 0)
+        timed_layout.addWidget(QLabel("限时(秒):"))
+        self.combo_timed_seconds = QComboBox()
+        self.combo_timed_seconds.addItems(["3", "5", "10", "15", "30"])
+        default_sec = str(self.config.get("mode", {}).get("timed_seconds", 10))
+        idx = self.combo_timed_seconds.findText(default_sec)
+        if idx >= 0:
+            self.combo_timed_seconds.setCurrentIndex(idx)
+        timed_layout.addWidget(self.combo_timed_seconds)
+        self.timed_config_widget.setVisible(False)
+        mode_layout.addWidget(self.timed_config_widget)
+
+        # 板块配置
+        self.sector_config_widget = QWidget()
+        sec_layout = QHBoxLayout(self.sector_config_widget)
+        sec_layout.setContentsMargins(0, 0, 0, 0)
+        sec_layout.addWidget(QLabel("同板块股票数:"))
+        self.spin_peer_count = QSpinBox()
+        self.spin_peer_count.setRange(1, 5)
+        self.spin_peer_count.setValue(self.config.get("mode", {}).get("sector_peer_count", 3))
+        sec_layout.addWidget(self.spin_peer_count)
+        self.sector_config_widget.setVisible(False)
+        mode_layout.addWidget(self.sector_config_widget)
+
+        layout.addWidget(mode_group)
+
+        # 初始化模式配置可见性
+        self._on_mode_changed(self.combo_mode.currentIndex())
 
         # ---- 训练配置 ----
         config_group = QGroupBox("⚙ 训练配置")
@@ -849,8 +920,16 @@ class MainWindow(QMainWindow):
         # 保存 AI 配置
         self._save_ai_config()
 
+        # 保存模式配置
+        self._save_mode_config()
+
         # 重置状态
         self.trade_manager.reset()
+        self.weekly_df = None
+        self.weekly_cursor = 0
+        self.sector_peers = []
+        self.sector_cursors = {}
+        self._clear_mode_widgets()
         days = self.spin_days.value()
 
         # 设置止损止盈
@@ -905,6 +984,20 @@ class MainWindow(QMainWindow):
 
         self.training_active = True
         self.log(f"🎮 训练开始! 当前可见 {self.cursor}/{len(self.df)} 根K线")
+
+        # ---- 模式初始化 ----
+        try:
+            mode = self.current_mode
+            if mode in ("multi_tf", "comprehensive"):
+                self.weekly_df = DataLoader.resample_weekly(self.df)
+
+            if mode in ("sector", "comprehensive"):
+                self._load_sector_peers_sync()
+        except Exception as e:
+            self.log(f"⚠ 模式数据准备失败: {e}")
+
+        self._setup_mode_widgets()
+
         self.statusBar().showMessage(
             f"训练中 | {self.stock_code} | 进度: {self.cursor}/{len(self.df)} | 仓位: 0%"
         )
@@ -941,6 +1034,7 @@ class MainWindow(QMainWindow):
                 f"训练中 | {self.stock_code} | 进度: {self.cursor}/{len(self.df)} | "
                 f"仓位: {self.trade_manager.position*100:.0f}%"
             )
+            self._update_mode_on_advance()
             if self.cursor >= len(self.df):
                 self.log("🏁 已到达最后一根K线")
                 self.end_training()
@@ -952,6 +1046,16 @@ class MainWindow(QMainWindow):
         if self.cursor > self.min_warmup:
             self.cursor -= 1
             self._refresh_chart()
+            if self.timer_bar:
+                self.timer_bar.stop()
+            if self.multi_tf_canvas and self.current_mode in ("multi_tf", "comprehensive"):
+                self._update_weekly_cursor()
+                self.multi_tf_canvas.render(self.weekly_cursor)
+            if self.sector_panel and self.current_mode in ("sector", "comprehensive"):
+                self._update_sector_cursors()
+                self.sector_panel.render(self.sector_cursors)
+            if self.psychology_tracker and self.current_mode == "comprehensive":
+                self.psychology_tracker.set_cursor(self.cursor)
             self.statusBar().showMessage(
                 f"训练中 | {self.stock_code} | 进度: {self.cursor}/{len(self.df)} | "
                 f"仓位: {self.trade_manager.position*100:.0f}%"
@@ -961,6 +1065,8 @@ class MainWindow(QMainWindow):
         """快进10天（PgDn键），逐根检查止损止盈。"""
         if not self.training_active or self.df is None:
             return
+        if self.timer_bar:
+            self.timer_bar.stop()
         target = min(self.cursor + 10, len(self.df))
         while self.cursor < target:
             self.cursor += 1
@@ -976,6 +1082,7 @@ class MainWindow(QMainWindow):
                     break  # 自动退出后停止推进
         self.chart.scroll_to_latest(self.cursor)
         self._refresh_chart()
+        self._update_mode_on_advance()
         self.statusBar().showMessage(
             f"训练中 | {self.stock_code} | 进度: {self.cursor}/{len(self.df)} | "
             f"仓位: {self.trade_manager.position*100:.0f}%"
@@ -1025,6 +1132,10 @@ class MainWindow(QMainWindow):
         if not self.training_active:
             return
         self.training_active = False
+
+        # 停止计时器
+        if self.timer_bar:
+            self.timer_bar.stop()
 
         # 显示全部 K 线
         self.cursor = len(self.df)
@@ -1079,8 +1190,23 @@ class MainWindow(QMainWindow):
             f"训练结束 | {self.stock_code} | 报告: {report_path}"
         )
 
-    # ============================================================
-    # 止损止盈
+        # 导出心理状态数据到报告
+        if self.psychology_tracker and self.current_mode == "comprehensive":
+            psych_md = self.psychology_tracker.export_for_report()
+            if psych_md and report_path:
+                try:
+                    from pathlib import Path as PPath
+                    p = PPath(report_path)
+                    if p.is_file():
+                        with open(p, "a", encoding="utf-8") as f:
+                            f.write("\n\n")
+                            f.write(psych_md)
+                        self.log("🧠 心理状态数据已追加到报告")
+                except Exception as e:
+                    self.log(f"⚠ 心理状态数据保存失败: {e}")
+
+        # 清理模式组件
+        self._clear_mode_widgets()
     # ============================================================
     def _check_sl_tp(self):
         """检查当前 bar 是否触发止损止盈。"""
@@ -1285,6 +1411,15 @@ class MainWindow(QMainWindow):
         self.ai_analyzer.config = self.config
         save_config(self.config)
 
+    def _save_mode_config(self):
+        """保存训练模式配置到 config。"""
+        self.config["mode"] = {
+            "current": self.current_mode,
+            "timed_seconds": int(self.combo_timed_seconds.currentText()),
+            "sector_peer_count": self.spin_peer_count.value(),
+        }
+        save_config(self.config)
+
     def _on_save_ai_clicked(self):
         """AI 配置保存按钮回调。"""
         self._save_ai_config()
@@ -1322,6 +1457,158 @@ class MainWindow(QMainWindow):
         """主图叠加指标切换回调。"""
         if self.training_active or self.df is not None:
             self._refresh_chart()
+
+    # ============================================================
+    # 训练模式管理
+    # ============================================================
+    def _on_mode_changed(self, index: int):
+        """训练模式切换回调。"""
+        modes = ["classic", "timed", "multi_tf", "sector", "comprehensive"]
+        if index < 0 or index >= len(modes):
+            return
+        self.current_mode = modes[index]
+
+        self.timed_config_widget.setVisible(
+            self.current_mode in ("timed", "comprehensive"))
+        self.sector_config_widget.setVisible(
+            self.current_mode in ("sector", "comprehensive"))
+
+        self.config.setdefault("mode", {})["current"] = self.current_mode
+        save_config(self.config)
+
+        if self.training_active and self.df is not None:
+            self._setup_mode_widgets()
+
+    def _setup_mode_widgets(self):
+        """创建当前模式的辅助组件并添加到图表下方。"""
+        self._clear_mode_widgets()
+        mode = self.current_mode
+
+        try:
+            if mode in ("timed", "comprehensive"):
+                seconds = int(self.combo_timed_seconds.currentText())
+                self.timer_bar = TimerBar(parent=self, seconds=seconds)
+                self.timer_bar.setFocusPolicy(Qt.NoFocus)
+                self.left_chart_layout.addWidget(self.timer_bar)
+                self._mode_widgets.append(self.timer_bar)
+                self.timer_bar.timeout.connect(self._on_timer_timeout)
+                self.timer_bar.start()
+        except Exception as e:
+            self.log(f"⚠ 限时模式组件初始化失败: {e}")
+
+        try:
+            if mode in ("multi_tf", "comprehensive"):
+                if self.weekly_df is None and self.df is not None:
+                    self.weekly_df = DataLoader.resample_weekly(self.df)
+                self.multi_tf_canvas = MultiTFCanvas(parent=self, height_px=180)
+                self.left_chart_layout.addWidget(self.multi_tf_canvas)
+                self._mode_widgets.append(self.multi_tf_canvas)
+                if self.weekly_df is not None:
+                    self.multi_tf_canvas.set_data(self.weekly_df)
+                    self._update_weekly_cursor()
+                    self.multi_tf_canvas.render(self.weekly_cursor)
+        except Exception as e:
+            self.log(f"⚠ 多周期组件初始化失败: {e}")
+
+        try:
+            if mode in ("sector", "comprehensive"):
+                if not self.sector_peers and self.stock_code:
+                    self._load_sector_peers_sync()
+                peer_count = self.spin_peer_count.value()
+                self.sector_panel = SectorPanel(parent=self, peer_count=peer_count)
+                self.left_chart_layout.addWidget(self.sector_panel)
+                self._mode_widgets.append(self.sector_panel)
+                if self.sector_peers:
+                    self.sector_panel.set_peers(self.sector_peers)
+                    self._update_sector_cursors()
+                    self.sector_panel.render(self.sector_cursors)
+                else:
+                    self.log("ℹ 未找到同板块股票，板块联动面板为空")
+        except Exception as e:
+            self.log(f"⚠ 板块联动组件初始化失败: {e}")
+
+        try:
+            if mode == "comprehensive":
+                self.psychology_tracker = PsychologyTracker(parent=self)
+                self.psychology_tracker.setFocusPolicy(Qt.NoFocus)
+                self.left_chart_layout.addWidget(self.psychology_tracker)
+                self._mode_widgets.append(self.psychology_tracker)
+                self.psychology_tracker.set_cursor(self.cursor)
+        except Exception as e:
+            self.log(f"⚠ 心理追踪组件初始化失败: {e}")
+
+    def _clear_mode_widgets(self):
+        """移除所有模式辅助组件。"""
+        if self.timer_bar:
+            self.timer_bar.stop()
+        for widget in self._mode_widgets:
+            self.left_chart_layout.removeWidget(widget)
+            widget.hide()
+            widget.deleteLater()
+        self._mode_widgets.clear()
+        self.timer_bar = None
+        self.multi_tf_canvas = None
+        self.sector_panel = None
+        self.psychology_tracker = None
+
+    def _update_mode_on_advance(self):
+        """K 线前进后更新所有模式组件。"""
+        if self.timer_bar and self.current_mode in ("timed", "comprehensive"):
+            self.timer_bar.start()
+
+        if self.multi_tf_canvas and self.current_mode in ("multi_tf", "comprehensive"):
+            self._update_weekly_cursor()
+            self.multi_tf_canvas.render(self.weekly_cursor)
+
+        if self.sector_panel and self.current_mode in ("sector", "comprehensive"):
+            self._update_sector_cursors()
+            self.sector_panel.render(self.sector_cursors)
+
+        if self.psychology_tracker and self.current_mode == "comprehensive":
+            self.psychology_tracker.set_cursor(self.cursor)
+
+    def _update_weekly_cursor(self):
+        """将日线 cursor 映射到周线 cursor。"""
+        if self.weekly_df is None or self.cursor <= 0:
+            self.weekly_cursor = 0
+            return
+        daily_idx = self.cursor - 1
+        indices_col = self.weekly_df.get("_daily_indices")
+        if indices_col is not None:
+            for w_idx, indices in enumerate(indices_col):
+                if daily_idx in indices:
+                    self.weekly_cursor = w_idx + 1
+                    return
+        self.weekly_cursor = len(self.weekly_df)
+
+    def _update_sector_cursors(self):
+        """将当前日线日期映射到每只同板块股票的 cursor。"""
+        if not self.df or self.cursor <= 0:
+            return
+        current_date = self.df.iloc[self.cursor - 1]["date"]
+        for code, peer_df in self.sector_peers:
+            mask = peer_df["date"] <= current_date
+            self.sector_cursors[code] = mask.sum()
+
+    def _load_sector_peers_sync(self):
+        """同步加载同板块股票数据。"""
+        try:
+            peer_count = self.spin_peer_count.value()
+            self.sector_peers = self.data_loader.load_sector_peers(
+                self.stock_code, peer_count
+            )
+            if self.sector_peers:
+                self.log(f"✅ 板块联动: 已加载 {len(self.sector_peers)} 只同板块股票")
+            else:
+                self.log("⚠ 未找到同板块股票数据")
+        except Exception as e:
+            self.log(f"⚠ 板块数据加载失败: {e}")
+            self.sector_peers = []
+
+    def _on_timer_timeout(self):
+        """限时模式倒计时归零回调。"""
+        self.log("⏰ 时间到! 自动前进")
+        self.next_day()
 
     def _on_tab_changed(self, index: int):
         """Tab 切换回调。"""
@@ -1476,5 +1763,26 @@ def main():
     sys.exit(app.exec() if hasattr(app, 'exec') else app.exec_())
 
 
+def _global_exception_hook(exc_type, exc_value, exc_tb):
+    """全局异常钩子，将未捕获异常写入日志文件。"""
+    import traceback as _tb
+    from pathlib import Path as _P
+    # 打包环境下 __file__ 在临时目录，用 exe 路径代替
+    try:
+        base = _P(sys.executable).parent
+    except Exception:
+        base = _P(__file__).parent
+    log_path = base / "crash.log"
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"\n{'='*60}\n")
+            f.write(f"崩溃时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            _tb.print_exception(exc_type, exc_value, exc_tb, file=f)
+    except Exception:
+        pass
+    sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+
 if __name__ == "__main__":
+    sys.excepthook = _global_exception_hook
     main()

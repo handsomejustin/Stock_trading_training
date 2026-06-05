@@ -60,7 +60,8 @@ class Database:
                 max_drawdown_pct REAL,
                 avg_hold_days REAL,
                 timing_score REAL,
-                report_path TEXT
+                report_path TEXT,
+                training_mode TEXT DEFAULT 'classic'
             );
 
             CREATE TABLE IF NOT EXISTS trades (
@@ -82,6 +83,15 @@ class Database:
                 timing_score_20d REAL
             );
         """)
+
+        # 兼容旧数据库：添加 training_mode 列（如果不存在）
+        try:
+            self.conn.execute(
+                "ALTER TABLE sessions ADD COLUMN training_mode TEXT DEFAULT 'classic'"
+            )
+        except Exception:
+            pass
+
         self.conn.commit()
 
     # ============================================================
@@ -136,13 +146,16 @@ class Database:
         # 最大回撤
         max_dd = self._calc_max_drawdown(completed)
 
+        training_mode = config.get("mode", {}).get("current", "classic") if config else "classic"
+
         # 插入 session
         cursor = self.conn.execute("""
             INSERT INTO sessions
                 (stock_code, training_date, total_bars, trade_count,
                  total_return_pct, buy_hold_return_pct, win_rate,
-                 max_drawdown_pct, avg_hold_days, timing_score, report_path)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 max_drawdown_pct, avg_hold_days, timing_score, report_path,
+                 training_mode)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             stock_code,
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -155,6 +168,7 @@ class Database:
             avg_hold,
             avg_timing,
             report_path,
+            training_mode,
         ))
         session_id = cursor.lastrowid
 
