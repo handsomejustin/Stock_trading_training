@@ -326,8 +326,11 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"已跳过 v{info.version}")
 
     def _do_download_update(self, info: UpdateInfo):
-        """下载更新并显示进度条。"""
-        progress = QProgressDialog("正在下载更新…", "取消", 0, 100, self)
+        """下载更新并显示进度条，下载完成后自动执行升级。"""
+        progress = QProgressDialog(
+            f"正在下载 v{info.version} ({info.size / 1024 / 1024:.1f} MB)…",
+            "取消", 0, 100, self
+        )
         progress.setWindowTitle("下载更新")
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
@@ -350,28 +353,30 @@ class MainWindow(QMainWindow):
         self._update_progress = progress
 
     def _on_download_done(self, zip_path: str):
-        """下载完成，确认后执行升级。"""
+        """下载完成，自动执行升级（无需二次确认）。"""
         if hasattr(self, "_update_progress"):
             self._update_progress.close()
 
-        reply = QMessageBox.question(
-            self, "升级确认",
-            "下载完成！程序将关闭并自动升级，是否继续？\n\n"
-            "升级过程中请勿操作，完成后程序会自动重启。",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
-        )
-        if reply == QMessageBox.Yes:
+        try:
             apply_update(zip_path)
-        else:
-            # 保留 zip 文件，下次可重试
-            self.statusBar().showMessage("升级已取消，下载文件已保留")
+        except Exception as e:
+            log_path = Path(sys.executable).parent / "_update.log"
+            QMessageBox.critical(
+                self, "升级失败",
+                f"启动升级失败: {e}\n\n"
+                f"日志文件: {log_path}"
+            )
 
     def _on_download_error(self, err_msg: str):
         """下载失败。"""
         if hasattr(self, "_update_progress"):
             self._update_progress.close()
-        QMessageBox.critical(self, "下载失败", f"更新下载失败:\n{err_msg}")
+        log_path = Path(sys.executable).parent / "_update.log"
+        QMessageBox.critical(
+            self, "下载失败",
+            f"更新下载失败:\n{err_msg}\n\n"
+            f"详细日志: {log_path}"
+        )
 
     # ============================================================
     # 暗色主题

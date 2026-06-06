@@ -3,18 +3,20 @@
 
 负责检查版本、下载更新、执行升级替换。
 升级时保留 config.yaml / training_history.db 等用户数据。
+
+关键设计：
+- 升级脚本使用 PowerShell（非 bat），原生支持 Unicode 路径
+- 全流程写日志到 app_dir/_update.log，方便排查问题
+- SHA256 校验兼容 "sha256:" 前缀格式
 """
 
-import json
+import hashlib
 import os
 import platform
-import shutil
 import subprocess
 import sys
-import tempfile
-import zipfile
-import hashlib
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import requests
@@ -53,6 +55,18 @@ def _get_platform_tag() -> str:
     return "win-x64"
 
 
+def _log(msg: str) -> None:
+    """追加日志到 app 目录下的 _update.log。"""
+    try:
+        app_dir = Path(sys.executable).parent
+        log_path = app_dir / "_update.log"
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{timestamp}] {msg}\n")
+    except Exception:
+        pass  # 日志写入失败不应阻断主流程
+
+
 def check_update(config: dict) -> UpdateInfo | None:
     """
     向服务器查询是否有新版本。
@@ -74,22 +88,27 @@ def check_update(config: dict) -> UpdateInfo | None:
         "version": __version__,
     }
 
+    _log(f"检查更新: {server_url}/api/update/check params={params}")
+
     try:
         resp = requests.get(
             f"{server_url}/api/update/check",
             params=params,
-            timeout=5,
+            timeout=10,
         )
         resp.raise_for_status()
         data = resp.json()
-    except Exception:
+    except Exception as e:
+        _log(f"检查更新失败: {e}")
         return None
 
     if not data or data.get("version") == __version__:
+        _log("已是最新版本")
         return None
 
     # 用户跳过的版本
     if skip_ver and data.get("version") == skip_ver:
+        _log(f"用户已跳过版本 {skip_ver}")
         return None
 
     info = UpdateInfo(
@@ -104,6 +123,7 @@ def check_update(config: dict) -> UpdateInfo | None:
     if info.download_url and not info.download_url.startswith("http"):
         info.download_url = server_url + info.download_url
 
+    _log(f"发现新版本: v{info.version}, size={info.size}, url={info.download_url}")
     return info
 
 
@@ -112,7 +132,7 @@ def download_update(
     progress_cb=None,
 ) -> str:
     """
-    下载更新 zip 到临时目录。
+    下载更新 zip 到 app 同级目录（用户可见）。
 
     Args:
         info: UpdateInfo
@@ -124,57 +144,79 @@ def download_update(
     Raises:
         Exception: 下载失败或校验不通过
     """
-    tmp_dir = tempfile.mkdtemp(prefix="kline_update_")
-    zip_path = os.path.join(tmp_dir, f"update_{info.version}.zip")
+    # 保存到 app 目录下，用户可见、方便排查
+    app_dir = Path(sys.executable).parent
+    download_dir = app_dir / "_update_download"
+    download_dir.mkdir(exist_ok=True)
+    zip_path = download_dir / f"update_v{info.version}.zip"
 
-    resp = requests.get(info.download_url, stream=True, timeout=60)
-    resp.raise_for_status()
+    _log(f"开始下载: {info.download_url} -> {zip_path}")
 
-    total = int(resp.headers.get("content-length", info.size))
-    downloaded = 0
-    sha = hashlib.sha256()
+    # 如果已有同版本 zip 且大小匹配，跳过下载
+    if zip_path.exists() and zip_path.stat().st_size == info.size:
+        _log(f"已存在同版本 zip ({info.size} bytes)，跳过下载")
+    else:
+        resp = requests.get(info.download_url, stream=True, timeout=120)
+        resp.raise_for_status()
 
-    with open(zip_path, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=65536):
-            f.write(chunk)
-            sha.update(chunk)
-            downloaded += len(chunk)
-            if progress_cb:
-                progress_cb(downloaded, total)
+        total = int(resp.headers.get("content-length", info.size))
+        downloaded = 0
+        sha = hashlib.sha256()
 
-    # SHA256 校验（兼容 "sha256:" 前缀格式）
-    expected_sha = info.sha256
-    if expected_sha.startswith("sha256:"):
-        expected_sha = expected_sha[7:]
-    if expected_sha and sha.hexdigest() != expected_sha:
-        os.remove(zip_path)
-        raise ValueError(
-            f"SHA256 校验失败\n"
-            f"期望: {info.sha256}\n"
-            f"实际: {sha.hexdigest()}"
-        )
+        with open(zip_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=65536):
+                f.write(chunk)
+                sha.update(chunk)
+                downloaded += len(chunk)
+                if progress_cb:
+                    progress_cb(downloaded, total)
 
-    return zip_path
+        _log(f"下载完成: {downloaded} bytes")
+
+        # SHA256 校验（兼容 "sha256:" 前缀格式）
+        expected_sha = info.sha256
+        if expected_sha.startswith("sha256:"):
+            expected_sha = expected_sha[7:]
+        actual_sha = sha.hexdigest()
+
+        if expected_sha and actual_sha != expected_sha:
+            zip_path.unlink(missing_ok=True)
+            error_msg = (
+                f"SHA256 校验失败\n"
+                f"期望: {expected_sha}\n"
+                f"实际: {actual_sha}"
+            )
+            _log(error_msg)
+            raise ValueError(error_msg)
+
+        _log(f"SHA256 校验通过: {actual_sha}")
+
+    return str(zip_path)
 
 
 def apply_update(zip_path: str) -> None:
     """
-    执行升级替换。生成 bat 脚本后退出主程序。
+    执行升级替换。生成 PowerShell 脚本后退出主程序。
 
-    升级流程（bat 脚本执行）：
+    为什么用 PowerShell 而不是 bat：
+    - PowerShell 原生支持 UTF-8/Unicode，中文路径不会乱码
+    - bat 文件以 UTF-8 保存但 cmd.exe 默认用 GBK 读取，中文路径会乱码
+    - 文件操作更可靠（Copy-Item、Expand-Archive 等）
+
+    升级流程（PowerShell 脚本执行）：
     1. 等待主 exe 退出
     2. 备份 config.yaml / training_history.db 等用户文件
-    3. 解压新版本覆盖安装目录
-    4. 恢复用户文件
-    5. 重启主程序
+    3. 备份旧版本到 backup 目录
+    4. 解压新版本覆盖安装目录
+    5. 恢复用户文件
+    6. 重启主程序
 
     Args:
         zip_path: 下载的新版本 zip 文件路径
     """
-    # 主程序所在目录
     app_dir = Path(sys.executable).parent
     exe_name = Path(sys.executable).name
-    bat_path = app_dir / "_updater.bat"
+    ps1_path = app_dir / "_updater.ps1"
 
     # 需要保留的用户文件列表
     preserve_files = [
@@ -184,96 +226,244 @@ def apply_update(zip_path: str) -> None:
         "training_history.db-wal",
     ]
 
-    # 生成 bat 脚本
-    bat_content = f"""@echo off
-chcp 65001 >nul
-echo ============================================
-echo   StockTraining Auto Update
-echo ============================================
-echo.
+    _log(f"准备升级: zip={zip_path}, app_dir={app_dir}, exe={exe_name}")
 
-REM ---- 1. 等待主程序退出 ----
-echo [1/5] 等待程序退出...
-timeout /t 2 /nobreak >nul
+    # 生成 PowerShell 升级脚本
+    ps1_content = r"""
+# StockTraining Auto Update Script
+# Generated by updater.py — DO NOT EDIT MANUALLY
 
-REM ---- 2. 备份用户文件 ----
-echo [2/5] 备份配置和数据文件...
-set "BACKUP_DIR={app_dir}\\_update_backup"
-if exist "%BACKUP_DIR%" rmdir /s /q "%BACKUP_DIR%"
-mkdir "%BACKUP_DIR%"
-"""
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+$AppDir = '{app_dir}'
+$ExeName = '{exe_name}'
+$ZipPath = '{zip_path}'
+$LogFile = Join-Path $AppDir '_update.log'
+$PidName = $ExeName -replace '\.\w+$', ''
+
+function Write-Log($msg) {{
+    $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $line = "[$ts] [PS] $msg"
+    Add-Content -Path $LogFile -Value $line -Encoding UTF8
+    Write-Host $line
+}}
+
+Write-Log '===== 升级脚本启动 ====='
+Write-Log "AppDir: $AppDir"
+Write-Log "ZipPath: $ZipPath"
+
+# ---- 1. 等待主程序退出 ----
+Write-Log '[1/6] 等待主程序退出...'
+$waited = 0
+$maxWait = 30
+while ($waited -lt $maxWait) {{
+    $proc = Get-Process -Name $PidName -ErrorAction SilentlyContinue
+    if (-not $proc) {{
+        Write-Log '主程序已退出'
+        break
+    }}
+    Start-Sleep -Seconds 1
+    $waited++
+}}
+
+if ($waited -ge $maxWait) {{
+    Write-Log '[警告] 等待超时，尝试强制关闭...'
+    try {{
+        Stop-Process -Name $PidName -Force -ErrorAction Stop
+        Start-Sleep -Seconds 2
+        Write-Log '已强制关闭'
+    }} catch {{
+        Write-Log "[错误] 无法关闭主程序: $_"
+        Read-Host '按回车键关闭此窗口'
+        exit 1
+    }}
+}}
+
+# ---- 2. 备份用户文件 ----
+Write-Log '[2/6] 备份用户文件...'
+$BackupDir = Join-Path $AppDir '_update_backup'
+if (Test-Path $BackupDir) {{ Remove-Item $BackupDir -Recurse -Force }}
+New-Item -ItemType Directory -Path $BackupDir | Out-Null
+""".rstrip()
+
     for f in preserve_files:
-        bat_content += f'if exist "{app_dir}\\{f}" copy /y "{app_dir}\\{f}" "%BACKUP_DIR%\\{f}" >nul\n'
-
-    # 备份旧版本到 backup 目录
-    bat_content += f"""
-REM ---- 3. 备份旧版本 ----
-echo [3/5] 备份旧版本...
-set "OLD_DIR={app_dir}\\backup"
-if exist "%OLD_DIR%" rmdir /s /q "%OLD_DIR%"
-mkdir "%OLD_DIR%"
-xcopy "{app_dir}\\_internal" "%OLD_DIR%\\_internal\\" /e /i /q >nul 2>&1
-copy /y "{app_dir}\\{exe_name}" "%OLD_DIR%\\" >nul 2>&1
-
-REM ---- 4. 解压新版本 ----
-echo [4/5] 解压新版本...
-set "TMP_DIR={app_dir}\\_update_tmp"
-if exist "%TMP_DIR%" rmdir /s /q "%TMP_DIR%"
-mkdir "%TMP_DIR%"
-powershell -Command "Expand-Archive -Path '{zip_path}' -DestinationPath '%TMP_DIR%' -Force"
-
-REM 查找解压后的目录（可能是套了一层目录）
-set "SRC_DIR=%TMP_DIR%"
-for /d %%i in ("%TMP_DIR%\\*") do (
-    if exist "%%i\\{exe_name}" set "SRC_DIR=%%i"
-)
-
-REM 删除旧文件
-rmdir /s /q "{app_dir}\\_internal" 2>nul
-del /q "{app_dir}\\{exe_name}" 2>nul
-
-REM 复制新文件
-if exist "%SRC_DIR%\\{exe_name}" (
-    copy /y "%SRC_DIR%\\{exe_name}" "{app_dir}\\" >nul
-    xcopy "%SRC_DIR%\\_internal" "{app_dir}\\_internal\\" /e /i /q >nul
-) else (
-    echo [错误] 未找到新版本文件，正在回滚...
-    copy /y "%OLD_DIR%\\{exe_name}" "{app_dir}\\" >nul
-    xcopy "%OLD_DIR%\\_internal" "{app_dir}\\_internal\\" /e /i /q >nul
-)
-
-REM ---- 5. 恢复用户文件 ----
-echo [5/5] 恢复配置和数据文件...
+        ps1_content += f"""
+$src = Join-Path $AppDir '{f}'
+if (Test-Path $src) {{
+    Copy-Item $src (Join-Path $BackupDir '{f}') -Force
+    Write-Log "  已备份: {f}"
+}}
 """
+
+    ps1_content += r"""
+
+# ---- 3. 备份旧版本 ----
+Write-Log '[3/6] 备份旧版本...'
+$OldDir = Join-Path $AppDir 'backup'
+if (Test-Path $OldDir) {{ Remove-Item $OldDir -Recurse -Force }}
+New-Item -ItemType Directory -Path $OldDir | Out-Null
+
+$internalDir = Join-Path $AppDir '_internal'
+if (Test-Path $internalDir) {{
+    Copy-Item $internalDir (Join-Path $OldDir '_internal') -Recurse -Force
+    Write-Log '  已备份 _internal/'
+}}
+$oldExe = Join-Path $AppDir $ExeName
+if (Test-Path $oldExe) {{
+    Copy-Item $oldExe (Join-Path $OldDir $ExeName) -Force
+    Write-Log "  已备份 $ExeName"
+}}
+
+# ---- 4. 解压新版本 ----
+Write-Log '[4/6] 解压新版本...'
+$TmpDir = Join-Path $AppDir '_update_tmp'
+if (Test-Path $TmpDir) {{ Remove-Item $TmpDir -Recurse -Force }}
+
+try {{
+    Expand-Archive -Path $ZipPath -DestinationPath $TmpDir -Force
+    Write-Log '  解压完成'
+}} catch {{
+    Write-Log "[错误] 解压失败: $_"
+    Write-Log '正在回滚...'
+    Copy-Item (Join-Path $OldDir $ExeName) $AppDir -Force
+    if (Test-Path (Join-Path $OldDir '_internal')) {{
+        Copy-Item (Join-Path $OldDir '_internal') $internalDir -Recurse -Force
+    }}
+    # 恢复用户文件
+"""
+
     for f in preserve_files:
-        bat_content += f'if exist "%BACKUP_DIR%\\{f}" copy /y "%BACKUP_DIR%\\{f}" "{app_dir}\\{f}" >nul\n'
-
-    bat_content += f"""
-REM 清理临时文件
-rmdir /s /q "%TMP_DIR%" 2>nul
-rmdir /s /q "%BACKUP_DIR%" 2>nul
-del /q "{zip_path}" 2>nul
-
-echo.
-echo 升级完成！正在启动...
-timeout /t 1 /nobreak >nul
-
-REM ---- 重启主程序 ----
-start "" "{app_dir}\\{exe_name}"
-
-REM 自删除
-(goto) 2>nul & del "%~f0"
+        ps1_content += f"""
+    $bf = Join-Path $BackupDir '{f}'
+    if (Test-Path $bf) {{ Copy-Item $bf (Join-Path $AppDir '{f}') -Force }}
 """
-    bat_path.write_text(bat_content, encoding="utf-8")
 
-    # 启动 bat 脚本并退出主程序
+    ps1_content += r"""
+    Read-Host '升级失败，已回滚。按回车键关闭此窗口'
+    exit 1
+}}
+
+# 查找解压后的源目录（zip 可能套了一层目录）
+$SrcDir = $TmpDir
+$subDirs = Get-ChildItem $TmpDir -Directory
+foreach ($d in $subDirs) {{
+    if (Test-Path (Join-Path $d.FullName $ExeName)) {{
+        $SrcDir = $d.FullName
+        Write-Log "  找到源目录: $SrcDir"
+        break
+    }}
+}}
+
+# ---- 5. 替换文件 ----
+Write-Log '[5/6] 替换文件...'
+
+# 删除旧 _internal
+if (Test-Path $internalDir) {{
+    Remove-Item $internalDir -Recurse -Force
+    Write-Log '  已删除旧 _internal/'
+}}
+
+# 删除旧 exe
+if (Test-Path $oldExe) {{
+    Remove-Item $oldExe -Force
+    Write-Log '  已删除旧 exe'
+}}
+
+# 复制新文件
+$newExe = Join-Path $SrcDir $ExeName
+if (Test-Path $newExe) {{
+    Copy-Item $newExe $AppDir -Force
+    Write-Log "  已复制 $ExeName"
+
+    $newInternal = Join-Path $SrcDir '_internal'
+    if (Test-Path $newInternal) {{
+        Copy-Item $newInternal $internalDir -Recurse -Force
+        Write-Log '  已复制 _internal/'
+    }}
+}} else {{
+    Write-Log '[错误] 未找到新版本 exe，正在回滚...'
+    Copy-Item (Join-Path $OldDir $ExeName) $AppDir -Force
+    if (Test-Path (Join-Path $OldDir '_internal')) {{
+        Copy-Item (Join-Path $OldDir '_internal') $internalDir -Recurse -Force
+    }}
+"""
+
+    for f in preserve_files:
+        ps1_content += f"""
+    $bf = Join-Path $BackupDir '{f}'
+    if (Test-Path $bf) {{ Copy-Item $bf (Join-Path $AppDir '{f}') -Force }}
+"""
+
+    ps1_content += r"""
+    Read-Host '升级失败，已回滚。按回车键关闭此窗口'
+    exit 1
+}}
+
+# 恢复用户文件
+Write-Log '  恢复用户文件...'
+"""
+
+    for f in preserve_files:
+        ps1_content += f"""
+$bf = Join-Path $BackupDir '{f}'
+if (Test-Path $bf) {{
+    Copy-Item $bf (Join-Path $AppDir '{f}') -Force
+    Write-Log "  已恢复: {f}"
+}}
+"""
+
+    ps1_content += r"""
+
+# ---- 6. 清理并重启 ----
+Write-Log '[6/6] 清理并重启...'
+
+# 清理临时目录
+if (Test-Path $TmpDir) {{ Remove-Item $TmpDir -Recurse -Force }}
+if (Test-Path $BackupDir) {{ Remove-Item $BackupDir -Recurse -Force }}
+
+# 保留 zip 不删除（方便排查）
+Write-Log '升级完成！'
+
+Start-Sleep -Seconds 1
+
+# 重启主程序
+$newExePath = Join-Path $AppDir $ExeName
+Write-Log "启动: $newExePath"
+Start-Process $newExePath
+
+# 自删除脚本
+Write-Log '清理升级脚本...'
+$self = $MyInvocation.MyCommand.Path
+Remove-Item $self -Force
+
+Write-Log '===== 升级完成 ====='
+"""
+
+    # 填入实际路径
+    ps1_content = ps1_content.format(
+        app_dir=str(app_dir),
+        exe_name=exe_name,
+        zip_path=str(zip_path),
+    )
+
+    ps1_path.write_text(ps1_content, encoding="utf-8-sig")  # BOM 确保 PowerShell 正确识别 UTF-8
+    _log(f"升级脚本已生成: {ps1_path}")
+
+    # 用 powershell.exe 启动升级脚本（-ExecutionPolicy Bypass 绕过执行策略）
     subprocess.Popen(
-        ["cmd", "/c", str(bat_path)],
+        [
+            "powershell.exe",
+            "-ExecutionPolicy", "Bypass",
+            "-NoProfile",
+            "-File", str(ps1_path),
+        ],
         cwd=str(app_dir),
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
         if sys.platform == "win32"
         else 0,
     )
+    _log("升级脚本已启动，主程序即将退出")
 
     # 退出主程序
     sys.exit(0)
