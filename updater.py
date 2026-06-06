@@ -142,8 +142,11 @@ def download_update(
             if progress_cb:
                 progress_cb(downloaded, total)
 
-    # SHA256 校验
-    if info.sha256 and sha.hexdigest() != info.sha256:
+    # SHA256 校验（兼容 "sha256:" 前缀格式）
+    expected_sha = info.sha256
+    if expected_sha.startswith("sha256:"):
+        expected_sha = expected_sha[7:]
+    if expected_sha and sha.hexdigest() != expected_sha:
         os.remove(zip_path)
         raise ValueError(
             f"SHA256 校验失败\n"
