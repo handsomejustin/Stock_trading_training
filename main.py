@@ -1635,6 +1635,17 @@ class MainWindow(QMainWindow):
         if modifiers is None:
             modifiers = Qt.NoModifier
 
+        # Qt 在 Shift+数字键时返回上档字符 key code，需归一化
+        _SHIFT_NUM_MAP = {
+            Qt.Key_Exclam: (Qt.Key_1, True),       # Shift+1 = !
+            Qt.Key_At: (Qt.Key_2, True),            # Shift+2 = @
+            Qt.Key_NumberSign: (Qt.Key_3, True),    # Shift+3 = #
+            Qt.Key_Dollar: (Qt.Key_4, True),        # Shift+4 = $
+        }
+        if key in _SHIFT_NUM_MAP:
+            key, _ = _SHIFT_NUM_MAP[key]
+            modifiers |= Qt.ShiftModifier
+
         # 方向/翻页
         if key == Qt.Key_Right:
             self.next_day()
@@ -1712,8 +1723,10 @@ class MainWindow(QMainWindow):
                 if self._handle_key(key, modifiers):
                     return True
 
-            # 数字键：仅在训练中且焦点不在文本控件时拦截
-            if key in (Qt.Key_1, Qt.Key_2, Qt.Key_3, Qt.Key_4):
+            # 数字键（含 Shift 上档）：仅在训练中且焦点不在文本控件时拦截
+            _NUM_KEYS = (Qt.Key_1, Qt.Key_2, Qt.Key_3, Qt.Key_4,
+                         Qt.Key_Exclam, Qt.Key_At, Qt.Key_NumberSign, Qt.Key_Dollar)
+            if key in _NUM_KEYS:
                 if self.training_active:
                     # 检查焦点是否在文本输入控件中
                     focus_widget = QApplication.focusWidget()
