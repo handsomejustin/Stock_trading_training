@@ -147,43 +147,52 @@ jobs:
             main.py
 
       # ──────────────────────────────────────
-      # 6. 打包产物（压缩）
+      # 6. 打包产物（压缩，文件名含版本号）
       # ──────────────────────────────────────
+      - name: Extract version from tag
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"  # e.g. v1.1.9
+          echo "VERSION_TAG=${TAG}" >> $GITHUB_ENV
+          echo "VERSION=${TAG#v}" >> $GITHUB_ENV
+
       - name: Package artifact (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $distDir = "dist/StockTraining"
-          $outFile = "${{ matrix.platform.artifact }}.zip"
+          $outFile = "${{ matrix.platform.artifact }}-${{ env.VERSION_TAG }}.zip"
           Compress-Archive -Path $distDir -DestinationPath $outFile
 
       - name: Package artifact (macOS)
         if: runner.os == 'macOS'
         run: |
           cd dist
+          OUTFILE="../${{ matrix.platform.artifact }}-${{ env.VERSION_TAG }}.zip"
           if [ -d "StockTraining.app" ]; then
-            zip -r -9 "../${{ matrix.platform.artifact }}.zip" "StockTraining.app"
+            zip -r -9 "$OUTFILE" "StockTraining.app"
           else
-            zip -r -9 "../${{ matrix.platform.artifact }}.zip" "StockTraining"
+            zip -r -9 "$OUTFILE" "StockTraining"
           fi
 
       - name: Package artifact (Linux)
         if: runner.os == 'Linux'
         run: |
           cd dist
-          tar czf "../${{ matrix.platform.artifact }}.tar.gz" "StockTraining"
+          tar czf "../${{ matrix.platform.artifact }}-${{ env.VERSION_TAG }}.tar.gz" "StockTraining"
 
       # ──────────────────────────────────────
-      # 7. 上传到 Actions Artifacts
+      # 7. 上传到 Actions Artifacts（精确匹配）
       # ──────────────────────────────────────
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.platform.artifact }}
+          name: ${{ matrix.platform.artifact }}-${{ env.VERSION_TAG }}
           path: |
-            *.zip
-            *.tar.gz
+            ${{ matrix.platform.artifact }}-${{ env.VERSION_TAG }}.zip
+            ${{ matrix.platform.artifact }}-${{ env.VERSION_TAG }}.tar.gz
           retention-days: 30
+          if-no-files-found: ignore
 
   # ══════════════════════════════════════════
   # 发布到 GitHub Release
@@ -217,11 +226,11 @@ jobs:
 
             | 平台 | 文件 |
             |------|------|
-            | Windows x86_64 | `StockTraining-windows-x86_64.zip` |
-            | Windows ARM64 | `StockTraining-windows-arm64.zip` |
-            | Linux x86_64 | `StockTraining-linux-x86_64.tar.gz` |
-            | Linux ARM64 | `StockTraining-linux-arm64.tar.gz` |
-            | macOS ARM (M1/M2/M3/M4) | `StockTraining-macos-arm64.zip` |
+            | Windows x86_64 | `StockTraining-windows-x86_64-${{ github.ref_name }}.zip` |
+            | Windows ARM64 | `StockTraining-windows-arm64-${{ github.ref_name }}.zip` |
+            | Linux x86_64 | `StockTraining-linux-x86_64-${{ github.ref_name }}.tar.gz` |
+            | Linux ARM64 | `StockTraining-linux-arm64-${{ github.ref_name }}.tar.gz` |
+            | macOS ARM (M1/M2/M3/M4) | `StockTraining-macos-arm64-${{ github.ref_name }}.zip` |
 
             ### 使用方法
             1. 下载对应平台的压缩包并解压
