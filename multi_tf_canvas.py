@@ -15,7 +15,7 @@ from matplotlib.patches import Rectangle
 
 import matplotlib
 import matplotlib.font_manager as _fm
-for _font in ["Microsoft YaHei", "SimHei", "SimSun", "KaiTi"]:
+for _font in ["Microsoft YaHei", "SimHei", "SimSun", "KaiTi", "Noto Sans CJK SC", "WenQuanYi Zen Hei", "WenQuanYi Micro Hei"]:
     _found = any(_font in f.name for f in _fm.fontManager.ttflist)
     if _found:
         matplotlib.rcParams["font.sans-serif"] = [_font, "DejaVu Sans"]

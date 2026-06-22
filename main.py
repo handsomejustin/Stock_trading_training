@@ -748,6 +748,19 @@ class MainWindow(QMainWindow):
         self.edit_model.setText(self.config.get("ai", {}).get("model", ""))
         ai_layout.addWidget(self.edit_model)
 
+        ai_layout.addWidget(QLabel("鉴权方式 (仅 anthropic):"))
+        self.combo_ai_auth_style = QComboBox()
+        self.combo_ai_auth_style.addItems(["x-api-key", "bearer"])
+        self.combo_ai_auth_style.setToolTip(
+            "x-api-key: 官方 Anthropic API\n"
+            "bearer: 部分中转网关 (Authorization: Bearer)"
+        )
+        auth_style = self.config.get("ai", {}).get("auth_style", "x-api-key")
+        idx = self.combo_ai_auth_style.findText(auth_style)
+        if idx >= 0:
+            self.combo_ai_auth_style.setCurrentIndex(idx)
+        ai_layout.addWidget(self.combo_ai_auth_style)
+
         # 保存按钮
         self.btn_save_ai = QPushButton("💾 保存 AI 配置")
         self.btn_save_ai.setStyleSheet("""
@@ -1411,6 +1424,7 @@ class MainWindow(QMainWindow):
             "api_key": self.edit_api_key.text(),
             "base_url": self.edit_base_url.text(),
             "model": self.edit_model.text(),
+            "auth_style": self.combo_ai_auth_style.currentText(),
         }
         # 更新 AI analyzer 的配置引用
         self.ai_analyzer.config = self.config
