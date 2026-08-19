@@ -139,14 +139,22 @@ class AIWorker(QThread):
     def _call_anthropic(self, api_key: str, ai_config: dict,
                         prompt: str) -> str:
         """调用 Anthropic Claude API。"""
-        model = ai_config.get("model", "claude-sonnet-4-20250514")
+        model = ai_config.get("model", "claude-sonnet-4-6")
+        base_url = ai_config.get("base_url", "") or "https://api.anthropic.com"
 
-        url = "https://api.anthropic.com/v1/messages"
+        # 鉴权方式：官方 API 用 x-api-key；部分中转网关（自带上游凭证）按
+        # Authorization: Bearer 路由。由 auth_style 配置项决定，默认 x-api-key。
+        auth_style = ai_config.get("auth_style", "x-api-key")
+
+        url = f"{base_url.rstrip('/')}/v1/messages"
         headers = {
-            "x-api-key": api_key,
             "anthropic-version": "2023-06-01",
             "Content-Type": "application/json",
         }
+        if auth_style == "bearer":
+            headers["Authorization"] = f"Bearer {api_key}"
+        else:
+            headers["x-api-key"] = api_key
         payload = {
             "model": model,
             "max_tokens": 4000,

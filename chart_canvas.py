@@ -17,7 +17,7 @@ from matplotlib.patches import Rectangle
 # ---- 中文字体配置 ----
 import matplotlib
 import matplotlib.font_manager as _fm
-for _font in ["Microsoft YaHei", "SimHei", "SimSun", "KaiTi"]:
+for _font in ["Microsoft YaHei", "SimHei", "SimSun", "KaiTi", "Noto Sans CJK SC", "WenQuanYi Zen Hei", "WenQuanYi Micro Hei"]:
     _found = any(_font in f.name for f in _fm.fontManager.ttflist)
     if _found:
         matplotlib.rcParams["font.sans-serif"] = [_font, "DejaVu Sans"]
@@ -182,10 +182,10 @@ class ChartCanvas(FigureCanvasQTAgg):
 
         all_axes = [self.ax_kline, self.ax_volume] + self.ax_indicators
         for ax in all_axes:
-            vl = ax.axvline(x=0, color=self.COLOR_CROSS, linewidth=0.5,
-                            linestyle="--", visible=False)
-            hl = ax.axhline(y=0, color=self.COLOR_CROSS, linewidth=0.5,
-                            linestyle="--", visible=False)
+            vl = ax.axvline(x=0, color=self.COLOR_CROSS, linewidth=0.8,
+                            linestyle="--", visible=False, zorder=100)
+            hl = ax.axhline(y=0, color=self.COLOR_CROSS, linewidth=0.8,
+                            linestyle="--", visible=False, zorder=100)
             self.cross_vlines.append(vl)
             self.cross_hlines.append(hl)
 
@@ -508,11 +508,11 @@ class ChartCanvas(FigureCanvasQTAgg):
             self._view_start = 0
         self.ax_kline.set_xlim(self._view_start - 1, view_end)
 
-        # ---- 刷新十字光标 ----
-        for vl in self.cross_vlines:
-            vl.set_visible(False)
-        for hl in self.cross_hlines:
-            hl.set_visible(False)
+        # ---- 重建十字光标 ----
+        # 上面的 ax.clear() 会把十字光标 Line2D 从 axes 中移除，旧引用变成
+        # 脱离 axes 的孤立对象，鼠标移动时 set_visible(True) 也永远画不出来。
+        # 必须在每次 render 后重新创建（创建时为隐藏状态，鼠标移动时再显示）。
+        self._init_crosshair()
 
         self.draw_idle()
 

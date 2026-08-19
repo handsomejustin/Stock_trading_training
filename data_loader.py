@@ -291,30 +291,14 @@ class DataLoader:
         Returns:
             list of (stock_code_str, DataFrame) 元组
         """
-        block_path = self._find_block_zs_path()
-        if block_path is None:
-            return []
-
-        try:
-            from easy_tdx.offline.block import read_block_dat
-            blocks = read_block_dat(block_path)
-        except Exception:
-            return []
-
         code_digits = stock_code[2:]
-        sector_codes = None
-        sector_name = ""
 
-        for block in blocks:
-            if code_digits in block.codes:
-                sector_codes = block.codes
-                sector_name = block.name
-                break
-
-        if not sector_codes:
+        # 同板块候选代码：优先 block_zs.dat，回退 tdxhy.cfg 行业分类
+        candidates = self._find_sector_candidates(code_digits)
+        if not candidates:
             return []
 
-        candidates = [c for c in sector_codes if c != code_digits]
+        candidates = [c for c in candidates if c != code_digits]
         random.shuffle(candidates)
 
         peers = []
@@ -334,15 +318,38 @@ class DataLoader:
 
         return peers
 
-    def _find_block_zs_path(self) -> Path | None:
-        """定位 block_zs.dat 行业板块数据文件。"""
-        candidates = [
-            self.tdx_home / "T0002" / "hq_cache" / "block_zs.dat",
-        ]
-        for p in candidates:
-            if p.is_file():
-                return p
-        return None
+    def _find_sector_candidates(self, code_digits: str) -> list[str]:
+        """查找与指定股票同板块的代码列表。
+
+        新版通达信可能没有 block_zs.dat，此时回退到 tdxhy.cfg
+        行业分类文件（按通达信行业代码匹配同行业个股）。
+        """
+        # 来源 1: block_zs.dat 板块文件
+        block_path = self.tdx_home / "T0002" / "hq_cache" / "block_zs.dat"
+        if block_path.is_file():
+            try:
+                from easy_tdx.offline.block import read_block_dat
+                blocks = read_block_dat(block_path)
+                for block in blocks:
+                    if code_digits in block.codes:
+                        return list(block.codes)
+            except Exception:
+                pass
+
+        # 来源 2: tdxhy.cfg 行业分类（{code: (tdx_industry, sw_industry)}）
+        hy_path = self.tdx_home / "T0002" / "hq_cache" / "tdxhy.cfg"
+        if hy_path.is_file():
+            try:
+                from easy_tdx.codec.industry import parse_tdxhy_cfg
+                mapping = parse_tdxhy_cfg(hy_path.read_bytes())
+                entry = mapping.get(code_digits)
+                if entry and entry[0]:
+                    tdx_ind = entry[0]
+                    return [c for c, (t, _s) in mapping.items() if t == tdx_ind]
+            except Exception:
+                pass
+
+        return []
 
     # ============================================================
     # 前复权

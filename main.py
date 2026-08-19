@@ -698,6 +698,9 @@ class MainWindow(QMainWindow):
         tp_val = abs(self.config.get("trading", {}).get("take_profit_pct", 0)) * 100
         self.spin_take_profit.setValue(tp_val)
         sl_tp_layout.addWidget(self.spin_take_profit)
+        # 训练中修改阈值即时生效
+        self.spin_stop_loss.valueChanged.connect(self._on_sl_tp_changed)
+        self.spin_take_profit.valueChanged.connect(self._on_sl_tp_changed)
         config_layout.addLayout(sl_tp_layout)
 
         # 开始训练按钮
@@ -747,6 +750,19 @@ class MainWindow(QMainWindow):
         self.edit_model.setPlaceholderText("如 gpt-4o-mini, deepseek-chat")
         self.edit_model.setText(self.config.get("ai", {}).get("model", ""))
         ai_layout.addWidget(self.edit_model)
+
+        ai_layout.addWidget(QLabel("鉴权方式 (仅 anthropic):"))
+        self.combo_ai_auth_style = QComboBox()
+        self.combo_ai_auth_style.addItems(["x-api-key", "bearer"])
+        self.combo_ai_auth_style.setToolTip(
+            "x-api-key: 官方 Anthropic API\n"
+            "bearer: 部分中转网关 (Authorization: Bearer)"
+        )
+        auth_style = self.config.get("ai", {}).get("auth_style", "x-api-key")
+        idx = self.combo_ai_auth_style.findText(auth_style)
+        if idx >= 0:
+            self.combo_ai_auth_style.setCurrentIndex(idx)
+        ai_layout.addWidget(self.combo_ai_auth_style)
 
         # 保存按钮
         self.btn_save_ai = QPushButton("💾 保存 AI 配置")
@@ -938,10 +954,7 @@ class MainWindow(QMainWindow):
         days = self.spin_days.value()
 
         # 设置止损止盈
-        sl_pct = self.spin_stop_loss.value()
-        tp_pct = self.spin_take_profit.value()
-        self.trade_manager.set_stop_loss(-sl_pct / 100.0 if sl_pct > 0 else None)
-        self.trade_manager.set_take_profit(tp_pct / 100.0 if tp_pct > 0 else None)
+        self._apply_sl_tp()
 
         ma_periods = self._parse_ma_periods()
         self.config["ma_periods"] = ma_periods
@@ -1213,6 +1226,27 @@ class MainWindow(QMainWindow):
         # 清理模式组件
         self._clear_mode_widgets()
     # ============================================================
+    def _apply_sl_tp(self):
+        """把面板里的止损/止盈百分比写入 trade_manager（0 表示不启用）。"""
+        sl_pct = self.spin_stop_loss.value()
+        tp_pct = self.spin_take_profit.value()
+        self.trade_manager.set_stop_loss(-sl_pct / 100.0 if sl_pct > 0 else None)
+        self.trade_manager.set_take_profit(tp_pct / 100.0 if tp_pct > 0 else None)
+
+    def _on_sl_tp_changed(self, _value=None):
+        """训练中修改止损/止盈阈值：即时生效并立刻对当前 bar 复检一次。"""
+        self._apply_sl_tp()
+        if self.training_active:
+            sl_pct = self.spin_stop_loss.value()
+            tp_pct = self.spin_take_profit.value()
+            self.log(
+                f"⚙ 止损止盈已更新: "
+                f"止损 {sl_pct:.1f}% / 止盈 {tp_pct:.1f}%"
+            )
+            # 新阈值可能已被当前 K 线触及，立即检查一次
+            self._check_sl_tp()
+            self._refresh_chart()
+
     def _check_sl_tp(self):
         """检查当前 bar 是否触发止损止盈。"""
         if self.trade_manager.position <= 0:
@@ -1411,6 +1445,7 @@ class MainWindow(QMainWindow):
             "api_key": self.edit_api_key.text(),
             "base_url": self.edit_base_url.text(),
             "model": self.edit_model.text(),
+            "auth_style": self.combo_ai_auth_style.currentText(),
         }
         # 更新 AI analyzer 的配置引用
         self.ai_analyzer.config = self.config
@@ -1588,7 +1623,7 @@ class MainWindow(QMainWindow):
 
     def _update_sector_cursors(self):
         """将当前日线日期映射到每只同板块股票的 cursor。"""
-        if not self.df or self.cursor <= 0:
+        if self.df is None or self.cursor <= 0:
             return
         current_date = self.df.iloc[self.cursor - 1]["date"]
         for code, peer_df in self.sector_peers:

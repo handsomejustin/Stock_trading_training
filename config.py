@@ -26,6 +26,7 @@ _DEFAULT_CONFIG = {
         "api_key": "",
         "base_url": "",       # 自定义 API 端点
         "model": "",          # 模型名称
+        "auth_style": "x-api-key",  # anthropic 鉴权方式: x-api-key(官方) / bearer(部分中转网关)
     },
     "trading": {
         "default_buy_ratio": 1.0,   # ↑ 键默认买入仓位
