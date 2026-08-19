@@ -22,6 +22,7 @@ ai:
   api_key: ''
   base_url: ''
   model: ''
+  auth_style: x-api-key  # anthropic 鉴权方式: x-api-key(官方) / bearer(部分中转网关)
 trading:
   default_buy_ratio: 1.0
   default_sell_ratio: 1.0
