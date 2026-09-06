@@ -15,7 +15,7 @@ import pandas as pd
 import numpy as np
 
 from indicators import SUB_INDICATOR_REGISTRY
-from trade_manager import TradeManager
+from trade_manager import TradeManager, compute_session_stats
 
 
 def generate_report(
@@ -28,6 +28,7 @@ def generate_report(
     output_dir: str = None,
     ai_analysis: str = None,
     quiz_answers: list = None,
+    start_idx: int = 30,
 ) -> tuple:
     """
     生成训练报告并保存为 Markdown 文件。
@@ -63,7 +64,7 @@ def generate_report(
     sections.append(_build_decision_snapshots(df, indicator_hub, trade_manager))
 
     # ---- 交易评分 ----
-    sections.append(_build_trade_scoring(df, trade_manager))
+    sections.append(_build_trade_scoring(df, trade_manager, start_idx))
 
     # ---- 收益总结 ----
     sections.append(_build_summary(df, trade_manager))
@@ -348,7 +349,8 @@ def _build_decision_snapshots(
     return "\n".join(lines)
 
 
-def _build_trade_scoring(df: pd.DataFrame, trade_manager: TradeManager) -> str:
+def _build_trade_scoring(df: pd.DataFrame, trade_manager: TradeManager,
+                         start_idx: int = 30) -> str:
     """生成交易评分段落。"""
     lines = [
         "## 交易评分",
@@ -362,12 +364,8 @@ def _build_trade_scoring(df: pd.DataFrame, trade_manager: TradeManager) -> str:
         lines.append("> 无完整交易记录。")
         return "\n".join(lines)
 
-    # Buy-and-hold 基准
-    min_warmup = 30
-    if len(df) > min_warmup:
-        bh_return = (df.iloc[-1]["close"] / df.iloc[min_warmup]["close"] - 1) * 100
-    else:
-        bh_return = 0.0
+    # Buy-and-hold 基准（唯一实现，见 compute_session_stats）
+    bh_return = compute_session_stats(trade_manager, df, start_idx)["buy_hold"]
 
     lines.append(f"**持有不动基准收益**: {bh_return:+.2f}%")
     lines.append("")

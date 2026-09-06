@@ -54,7 +54,7 @@ assert dlg.apply_path == "C:/new_tdx"
 print("OnboardingDialog OK (3 pages, apply_path)")
 
 # ---- 5. F1 快捷键速查(拦截后 mock 弹窗) ----
-Qt = app_main.dict_mode_name and __import__("main").Qt
+Qt = app_main.Qt
 shown = []
 orig = app_main.QMessageBox.information
 app_main.QMessageBox.information = lambda *a, **k: shown.append(1)

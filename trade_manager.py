@@ -9,6 +9,47 @@ from portfolio import Portfolio, CompletedTrade
 import pandas as pd
 
 
+def compute_session_stats(trade_manager, df: pd.DataFrame,
+                          start_idx: int = 30) -> dict:
+    """
+    训练会话收益统计的唯一实现（主窗口小结 / 数据库 / 报告共用）。
+
+    Args:
+        trade_manager: TradeManager 实例
+        df: 完整 K 线数据
+        start_idx: 「持有不动」基准起点，应为训练实际起点
+                   （指标预热位置，由调用方传入）
+
+    Returns:
+        dict: total_return(含浮动) / buy_hold / excess / trade_count /
+              win_count / win_rate
+    """
+    completed = trade_manager.get_completed_trades()
+    last_price = df.iloc[-1]["close"]
+
+    total_return = sum(ct.return_pct for ct in completed)
+    if (trade_manager.portfolio.position > 0
+            and trade_manager.portfolio.avg_cost > 0):
+        total_return += (last_price / trade_manager.portfolio.avg_cost
+                         - 1.0) * 100.0
+
+    if len(df) > start_idx:
+        buy_hold = (last_price / df.iloc[start_idx]["close"] - 1.0) * 100.0
+    else:
+        buy_hold = 0.0
+
+    win_count = sum(1 for ct in completed if ct.return_pct > 0)
+    n = len(completed)
+    return {
+        "total_return": total_return,
+        "buy_hold": buy_hold,
+        "excess": total_return - buy_hold,
+        "trade_count": n,
+        "win_count": win_count,
+        "win_rate": (win_count / n) if n else 0.0,
+    }
+
+
 class TradeManager:
     """
     模拟交易管理器。

@@ -77,15 +77,17 @@ class BankBuildWorker(QThread):
     built = Signal(int)      # 事件总数
     failed = Signal(str)
 
-    def __init__(self, data_loader, bank):
+    def __init__(self, data_loader, bank, indicator_params: dict = None):
         super().__init__()
         self.data_loader = data_loader
         self.bank = bank
+        self.indicator_params = indicator_params
 
     def run(self):
         try:
             self.bank.build(self.data_loader,
-                            progress_cb=self.progress.emit)
+                            progress_cb=self.progress.emit,
+                            indicator_params=self.indicator_params)
             self.built.emit(self.bank.event_count())
         except Exception as e:
             self.failed.emit(str(e))

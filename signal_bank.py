@@ -86,18 +86,21 @@ def _sig_rsi_overbought(hub_results, a) -> np.ndarray:
     return (rsi6 > 85) & (_shift(rsi6) <= 85)             # 首日进入超买区
 
 
-def _compute_signal_inputs(a: dict) -> dict:
+def _compute_signal_inputs(a: dict, params: dict = None) -> dict:
     """
     只计算 6 个信号所需的指标数组。
 
-    调用与 indicators.py 注册表完全相同的 MyTT 函数与默认参数，
-    保证信号检测结果与训练图表所见指标一致。
-    全量 15 指标计算约 800ms/股，仅算 3 个约 2ms/股。
+    调用与 indicators.py 注册表相同的 MyTT 函数，参数来自用户配置
+    （config["indicators"]），保证信号检测结果与训练图表所见指标一致；
+    缺省时用注册表默认参数。全量 15 指标计算约 800ms/股，仅算 3 个约 2ms/股。
     """
+    params = params or {}
     toarr = lambda x: np.asarray(x, dtype=float)
-    dif, dea, _ = MACD(a["close"], SHORT=12, LONG=26, M=9)
-    k, d, j = KDJ(a["close"], a["high"], a["low"], N=9, M1=3, M2=3)
-    rsi6 = RSI(a["close"], N=6)
+    dif, dea, _ = MACD(a["close"], **params.get(
+        "MACD", {"SHORT": 12, "LONG": 26, "M": 9}))
+    k, d, j = KDJ(a["close"], a["high"], a["low"], **params.get(
+        "KDJ", {"N": 9, "M1": 3, "M2": 3}))
+    rsi6 = RSI(a["close"], **params.get("RSI", {"N": 6}))
     return {
         "MACD": {"DIF": toarr(dif), "DEA": toarr(dea)},
         "KDJ": {"K": toarr(k), "D": toarr(d), "J": toarr(j)},
@@ -273,7 +276,7 @@ class SignalBank:
     # 构建
     # ============================================================
     def build(self, data_loader, progress_cb=None,
-              stock_sample: int = None) -> int:
+              stock_sample: int = None, indicator_params: dict = None) -> int:
         """
         扫描股票并重建题库（默认随机抽取 SAMPLE_STOCKS 只）。
 
@@ -282,6 +285,8 @@ class SignalBank:
             progress_cb: 可选回调 progress_cb(text)，每 50 只股票汇报一次
             stock_sample: 随机抽取的股票数；None = 用 SAMPLE_STOCKS，
                           0 = 全市场，N = 抽 N 只
+            indicator_params: 指标参数（config["indicators"]），
+                              缺省用注册表默认值
 
         Returns:
             int: 入库事件总数
@@ -313,7 +318,7 @@ class SignalBank:
                     continue
 
                 try:
-                    rows = self._detect_stock(df, stock)
+                    rows = self._detect_stock(df, stock, indicator_params)
                 except Exception:
                     continue
                 for sid, event_rows in rows.items():
@@ -348,7 +353,8 @@ class SignalBank:
         finally:
             conn.close()
 
-    def _detect_stock(self, df: pd.DataFrame, stock: dict) -> dict:
+    def _detect_stock(self, df: pd.DataFrame, stock: dict,
+                      indicator_params: dict = None) -> dict:
         """
         检测单只股票的信号事件，返回 {signal_id: [event_rows]}。
 
@@ -369,8 +375,8 @@ class SignalBank:
         if hi_i <= lo_i:
             return {}
 
-        # 仅计算信号所需的 MACD/KDJ/RSI（与训练图表指标算法一致）
-        hub_results = _compute_signal_inputs(a)
+        # 仅计算信号所需的 MACD/KDJ/RSI（参数与训练图表一致）
+        hub_results = _compute_signal_inputs(a, indicator_params)
 
         # 前瞻收益 / 期间最大涨跌（向量化滑窗）
         high_win = sliding_window_view(a["high"], FORWARD_BARS)

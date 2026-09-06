@@ -14,6 +14,8 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 
+from trade_manager import compute_session_stats
+
 
 class Database:
     """
@@ -124,7 +126,7 @@ class Database:
     # ============================================================
     def save_session(self, stock_code: str, df: pd.DataFrame,
                      trade_manager, report_path: str,
-                     config: dict) -> int:
+                     config: dict, start_idx: int = 30) -> int:
         """
         保存一次训练会话及其所有交易记录。
 
@@ -134,31 +136,19 @@ class Database:
             trade_manager: TradeManager 实例
             report_path: 报告文件路径
             config: 配置字典
+            start_idx: 「持有不动」基准起点（训练实际起点）
 
         Returns:
             int: 新创建的 session_id
         """
         completed = trade_manager.get_completed_trades()
 
-        # 计算会话级统计
-        total_return = sum(ct.return_pct for ct in completed)
-        # 未平仓部分
-        if trade_manager.portfolio.position > 0 and trade_manager.portfolio.avg_cost > 0:
-            last_price = df.iloc[-1]["close"]
-            open_ret = (last_price / trade_manager.portfolio.avg_cost - 1.0) * 100.0
-            total_return += open_ret
-
-        # 持有不动收益率（从训练开始到结束）
-        min_warmup = 30  # 与 main.py 中一致
-        if len(df) > min_warmup:
-            buy_hold = (df.iloc[-1]["close"] / df.iloc[min_warmup]["close"] - 1.0) * 100.0
-        else:
-            buy_hold = 0.0
-
-        # 胜率
-        wins = sum(1 for ct in completed if ct.return_pct > 0)
-        total = len(completed)
-        win_rate = wins / total if total > 0 else 0.0
+        # 会话级统计（唯一实现，见 trade_manager.compute_session_stats）
+        stats = compute_session_stats(trade_manager, df, start_idx)
+        total_return = stats["total_return"]
+        buy_hold = stats["buy_hold"]
+        total = stats["trade_count"]
+        win_rate = stats["win_rate"]
 
         # 平均持仓天数
         hold_days_list = [ct.hold_days for ct in completed]
