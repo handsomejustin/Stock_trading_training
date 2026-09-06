@@ -731,11 +731,12 @@ class MainWindow(QMainWindow):
         bottom_bar = self._build_bottom_bar()
         main_layout.addWidget(bottom_bar)
 
-        self.main_stack.addWidget(training_page)
-
-        # ---- 首页：模式选择卡片 ----
+        # ---- 首页：模式选择卡片（index 0 = 首页，index 1 = 训练页） ----
         home_page = self._build_home_page()
+        self._home_page = home_page
         self.main_stack.addWidget(home_page)
+
+        self.main_stack.addWidget(training_page)
         self.main_stack.setCurrentIndex(0)
 
         # ---- 状态栏 ----

@@ -16,8 +16,8 @@ w = app_main.MainWindow()
 
 # ---- 1. 双页栈:首页为默认页 ----
 assert hasattr(w, "main_stack") and w.main_stack.count() == 2
-assert w.main_stack.currentIndex() == 0, "启动应停留在首页"
-print("main_stack OK (home default)")
+assert w.main_stack.currentWidget() is w._home_page, "启动应停留在首页"
+print("main_stack OK (home default, page identity)")
 
 # ---- 2. 模式卡片入口:切换到训练页并触发训练 ----
 called = []
@@ -25,12 +25,12 @@ w.start_training = lambda: called.append(1)   # 阻断真实训练
 w._start_mode_from_home("quiz")
 assert w.combo_mode.currentText() == "答题模式"
 assert w.current_mode == "quiz"
-assert w.main_stack.currentIndex() == 1
+assert w.main_stack.currentWidget() is not w._home_page, "应切到训练页"
 assert called == [1]
 print("mode card -> training page OK")
 
 w._go_home()
-assert w.main_stack.currentIndex() == 0
+assert w.main_stack.currentWidget() is w._home_page
 print("_go_home OK")
 
 # ---- 3. 高级设置入口(不触发训练) ----
@@ -80,9 +80,9 @@ hub = IndicatorHub(df, {"indicators": {}, "ma_periods": [5]})
 hub.calculate_all()
 w._show_session_summary = lambda s, q=None: None
 w._on_load_done(df, "SH600000", hub, 30)
-assert w.main_stack.currentIndex() == 1
+assert w.main_stack.currentWidget() is not w._home_page
 w.end_training()
-assert w.main_stack.currentIndex() == 0, "训练结束应回首页"
+assert w.main_stack.currentWidget() is w._home_page, "训练结束应回首页"
 print("end_training -> home OK")
 
 # ---- 7. config 默认值合并 ----
