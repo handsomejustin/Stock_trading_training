@@ -15,6 +15,7 @@ _CONFIG_PATH = Path(__file__).parent / "config.yaml"
 # 默认配置（硬编码，确保配置文件缺失时仍可运行）
 _DEFAULT_CONFIG = {
     "tdx_home": "",
+    "first_run_done": False,    # 新手引导是否已展示
     "training_days": 120,
     "panel_count": 3,
     "default_sub_indicators": ["MACD", "KDJ", "RSI", "CCI", "BIAS"],

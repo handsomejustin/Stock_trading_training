@@ -16,7 +16,7 @@ try:
         QLabel, QLineEdit, QPushButton, QSpinBox, QComboBox, QTextEdit,
         QFileDialog, QGroupBox, QStatusBar, QCheckBox,
         QMessageBox, QSplitter, QTabWidget, QDoubleSpinBox,
-        QProgressDialog, QDialog,
+        QProgressDialog, QDialog, QStackedWidget, QGridLayout,
     )
     from PySide6.QtCore import Qt, QDateTime, QEvent, QThread, Signal, QTimer
     from PySide6.QtGui import QPalette, QColor, QFont, QIcon, QPainter, QPen, QAction
@@ -27,7 +27,7 @@ except ImportError:
         QLabel, QLineEdit, QPushButton, QSpinBox, QComboBox, QTextEdit,
         QFileDialog, QGroupBox, QStatusBar, QCheckBox,
         QMessageBox, QSplitter, QTabWidget, QDoubleSpinBox,
-        QProgressDialog, QDialog,
+        QProgressDialog, QDialog, QStackedWidget, QGridLayout,
     )
     from PyQt5.QtCore import Qt, QDateTime, QEvent, QThread, pyqtSignal as Signal, QTimer
     from PyQt5.QtGui import QPalette, QColor, QFont, QIcon, QPainter, QPen
@@ -203,6 +203,145 @@ def dict_mode_name(mode: str) -> str:
     }.get(mode, mode)
 
 
+class OnboardingDialog(QDialog):
+    """
+    首次启动新手引导（3 页向导）。
+
+    关闭后主窗口读取 apply_path（若有变更）并写入 first_run_done。
+    """
+
+    def __init__(self, parent, tdx_path: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle("欢迎使用盘感训练器")
+        self.setMinimumSize(600, 420)
+        self._initial_path = tdx_path
+        self.apply_path = None
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self._build_welcome_page(tdx_path))
+        self.stack.addWidget(self._build_keys_page())
+        self.stack.addWidget(self._build_modes_page())
+        layout.addWidget(self.stack)
+
+        btn_row = QHBoxLayout()
+        self._btn_back = QPushButton("← 上一步")
+        self._btn_back.clicked.connect(self._go_prev)
+        self._btn_next = QPushButton("下一步 →")
+        self._btn_next.clicked.connect(self._go_next)
+        btn_row.addStretch()
+        btn_row.addWidget(self._btn_back)
+        btn_row.addWidget(self._btn_next)
+        layout.addLayout(btn_row)
+        self._sync_buttons()
+
+    def _make_page(self) -> tuple[QWidget, QVBoxLayout]:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setSpacing(10)
+        return page, layout
+
+    def _build_welcome_page(self, tdx_path: str) -> QWidget:
+        page, layout = self._make_page()
+        title = QLabel("👋 欢迎使用盘感训练器")
+        title.setStyleSheet("color: #ffffff; font-size: 22px; font-weight: bold;")
+        layout.addWidget(title)
+
+        intro = QLabel(
+            "这是一款 K 线推演训练工具：程序隐藏未来行情，你逐根揭K线、\n"
+            "模拟买卖，练的是「技术选时」的盘感。\n\n"
+            "第一步：确认本地通达信数据目录（行情数据从这里读取）。")
+        intro.setStyleSheet("color: #bbbbbb; font-size: 15px;")
+        layout.addWidget(intro)
+
+        path_row = QHBoxLayout()
+        self._edit_tdx = QLineEdit(tdx_path)
+        self._edit_tdx.setPlaceholderText("例如 C:\\new_tdx（自动检测失败时手动选择）")
+        path_row.addWidget(self._edit_tdx, stretch=1)
+        btn_browse = QPushButton("浏览…")
+        btn_browse.clicked.connect(self._browse)
+        path_row.addWidget(btn_browse)
+        layout.addLayout(path_row)
+
+        tip = QLabel("提示：之后也可以在「⚙ 高级设置」中随时修改。")
+        tip.setStyleSheet("color: #888888; font-size: 13px;")
+        layout.addWidget(tip)
+        layout.addStretch()
+        return page
+
+    def _browse(self):
+        path = QFileDialog.getExistingDirectory(self, "选择通达信安装目录")
+        if path:
+            self._edit_tdx.setText(path)
+
+    def _build_keys_page(self) -> QWidget:
+        page, layout = self._make_page()
+        title = QLabel("⌨ 记住这几组快捷键")
+        title.setStyleSheet("color: #ffffff; font-size: 22px; font-weight: bold;")
+        layout.addWidget(title)
+        keys = QLabel(
+            "→            前进一根K线（核心操作）\n"
+            "←            后退\n"
+            "PgDn         快进 10 根\n"
+            "1 / 2 / 3 / 4      买入 25% / 33% / 50% / 100% 仓位\n"
+            "Shift+1/2/3/4     卖出对应仓位\n"
+            "↑ / ↓        按默认仓位买入 / 卖出\n"
+            "Space        观望一天\n"
+            "Esc          结束训练（出报告和小结）\n"
+            "F1           随时查看快捷键速查")
+        keys.setStyleSheet(
+            "color: #cccccc; font-size: 16px; background-color: #252525; "
+            "border-radius: 6px; padding: 16px;")
+        layout.addWidget(keys)
+        layout.addStretch()
+        return page
+
+    def _build_modes_page(self) -> QWidget:
+        page, layout = self._make_page()
+        title = QLabel("🎯 六种训练模式")
+        title.setStyleSheet("color: #ffffff; font-size: 22px; font-weight: bold;")
+        layout.addWidget(title)
+        lines = []
+        for key, icon, name, desc in MainWindow.MODE_CARDS:
+            lines.append(f"{icon}  {name} —— {desc}")
+        modes = QLabel("\n".join(lines))
+        modes.setStyleSheet(
+            "color: #cccccc; font-size: 15px; background-color: #252525; "
+            "border-radius: 6px; padding: 16px;")
+        layout.addWidget(modes)
+        ready = QLabel("就绪了？回首页选一个模式，开始训练！")
+        ready.setStyleSheet("color: #4a9eff; font-size: 15px; font-weight: bold;")
+        layout.addWidget(ready)
+        layout.addStretch()
+        return page
+
+    def _go_prev(self):
+        if self.stack.currentIndex() > 0:
+            self.stack.setCurrentIndex(self.stack.currentIndex() - 1)
+        self._sync_buttons()
+
+    def _go_next(self):
+        if self.stack.currentIndex() < self.stack.count() - 1:
+            self.stack.setCurrentIndex(self.stack.currentIndex() + 1)
+        else:
+            self._finish()
+        self._sync_buttons()
+
+    def _finish(self):
+        path = self._edit_tdx.text().strip()
+        if path and path != self._initial_path:
+            self.apply_path = path
+        self.accept()
+
+    def _sync_buttons(self):
+        first = self.stack.currentIndex() == 0
+        last = self.stack.currentIndex() == self.stack.count() - 1
+        self._btn_back.setEnabled(not first)
+        self._btn_next.setText("完成 ✓" if last else "下一步 →")
+
+
 class LoadWorker(QThread):
     """后台线程：执行扫描选股 + 指标计算。"""
     status = Signal(str)       # 进度文字
@@ -341,11 +480,38 @@ class MainWindow(QMainWindow):
         # ---- 初始化数据加载器 ----
         self._init_data_loader()
 
+        # ---- 首次启动新手引导 ----
+        if not self.config.get("first_run_done"):
+            QTimer.singleShot(300, self._show_onboarding)
+
         # ---- 启动时自动检查更新 ----
         self._pending_update: UpdateInfo | None = None
         update_cfg = self.config.get("update", {})
         if update_cfg.get("auto_check", True):
             QTimer.singleShot(3000, self._silent_check_update)
+
+    def _show_onboarding(self):
+        """首次启动新手引导（3 页向导）。"""
+        try:
+            dlg = OnboardingDialog(self, self.tdx_path_edit.text())
+            dlg.exec()
+            if dlg.apply_path:
+                self.tdx_path_edit.setText(dlg.apply_path)
+                self.data_loader = DataLoader(dlg.apply_path or None)
+                if self.data_loader.is_available():
+                    self.config["tdx_home"] = dlg.apply_path
+                    self.log(f"✅ 通达信目录: {dlg.apply_path}")
+                else:
+                    self.log("⚠ 所选目录无效，可在「高级设置」中重试")
+        except Exception as e:
+            self.log(f"⚠ 新手引导显示失败: {e}")
+        finally:
+            self.config["first_run_done"] = True
+            save_config(self.config)
+        if hasattr(self, "_home_hint"):
+            ok = self.data_loader and self.data_loader.is_available()
+            self._home_hint.setText(
+                "" if ok else "⚠ 未找到通达信数据目录，请到「高级设置」选择")
 
     # ============================================================
     # 菜单栏 & 自动更新
@@ -527,10 +693,13 @@ class MainWindow(QMainWindow):
     # UI 构建
     # ============================================================
     def _build_ui(self):
-        """构建主窗口 UI 布局。"""
-        central = QWidget()
-        self.setCentralWidget(central)
-        main_layout = QVBoxLayout(central)
+        """构建主窗口 UI 布局（首页 + 训练页双页栈）。"""
+        self.main_stack = QStackedWidget()
+        self.setCentralWidget(self.main_stack)
+
+        # ---- 训练页：图表 + 控制面板 ----
+        training_page = QWidget()
+        main_layout = QVBoxLayout(training_page)
         main_layout.setContentsMargins(4, 4, 4, 4)
 
         # ---- 上部：图表 + 控制面板（水平分割） ----
@@ -562,9 +731,128 @@ class MainWindow(QMainWindow):
         bottom_bar = self._build_bottom_bar()
         main_layout.addWidget(bottom_bar)
 
+        self.main_stack.addWidget(training_page)
+
+        # ---- 首页：模式选择卡片 ----
+        home_page = self._build_home_page()
+        self.main_stack.addWidget(home_page)
+        self.main_stack.setCurrentIndex(0)
+
         # ---- 状态栏 ----
-        self.statusBar().showMessage("就绪 - 请选择通达信目录并开始训练")
+        self.statusBar().showMessage("就绪 - 选择一种模式开始训练（F1 查看快捷键）")
         self.statusBar().setStyleSheet("color: #cccccc; font-size: 14px;")
+
+    # 模式卡片定义: (key, 图标, 名称, 一句话说明)
+    MODE_CARDS = [
+        ("classic", "📈", "经典模式", "随机个股逐根揭开K线，手动买卖练盘感"),
+        ("timed", "⏱", "限时模式", "每根K线倒计时，逼你快速决策"),
+        ("multi_tf", "📅", "多周期模式", "日线+周线联动推演，看大做小"),
+        ("sector", "🏭", "板块联动", "同板块多股同步对照，识别共振"),
+        ("comprehensive", "🧠", "综合训练", "全要素训练 + 心理状态记录"),
+        ("quiz", "🎯", "答题模式", "信号出现你怎么做？历史数据来判分"),
+    ]
+
+    def _build_home_page(self) -> QWidget:
+        """构建首页：标题 + 模式卡片 + 工具入口。"""
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(48, 36, 48, 24)
+        outer.setSpacing(18)
+
+        title = QLabel("盘感训练器")
+        title.setStyleSheet("font-size: 34px; font-weight: bold; color: #ffffff;")
+        title.setAlignment(Qt.AlignCenter)
+        outer.addWidget(title)
+
+        subtitle = QLabel("K线推演 · 模拟交易 · 信号判分 —— 练出你的技术选时盘感")
+        subtitle.setStyleSheet("color: #888888; font-size: 15px;")
+        subtitle.setAlignment(Qt.AlignCenter)
+        outer.addWidget(subtitle)
+
+        grid = QGridLayout()
+        grid.setSpacing(14)
+        card_style = """
+            QPushButton {
+                background-color: #2b2b2b; color: #e0e0e0;
+                border: 1px solid #3c3c3c; border-radius: 8px;
+                padding: 14px 16px; text-align: left;
+            }
+            QPushButton:hover {
+                background-color: #333333; border: 1px solid #4a9eff;
+            }
+        """
+        for i, (key, icon, name, desc) in enumerate(self.MODE_CARDS):
+            btn = QPushButton(f"{icon}  {name}\n     {desc}")
+            btn.setStyleSheet(card_style)
+            btn.setMinimumHeight(92)
+            btn.setFont(QFont("Microsoft YaHei", 12))
+            btn.clicked.connect(
+                lambda _=False, k=key: self._start_mode_from_home(k))
+            grid.addWidget(btn, i // 3, i % 3)
+        outer.addLayout(grid, stretch=1)
+
+        tool_row = QHBoxLayout()
+        btn_advanced = QPushButton("⚙ 高级设置")
+        btn_advanced.setStyleSheet("""
+            QPushButton {
+                background-color: #3c3c3c; color: #cccccc;
+                padding: 8px 20px; border: 1px solid #555555;
+                border-radius: 4px; font-size: 14px;
+            }
+            QPushButton:hover { background-color: #505050; }
+        """)
+        btn_advanced.clicked.connect(
+            lambda: self.main_stack.setCurrentIndex(1))
+        tool_row.addWidget(btn_advanced)
+
+        btn_rebuild = QPushButton("🔄 重建题库")
+        btn_rebuild.setStyleSheet("""
+            QPushButton {
+                background-color: #3c3c3c; color: #cccccc;
+                padding: 8px 20px; border: 1px solid #555555;
+                border-radius: 4px; font-size: 14px;
+            }
+            QPushButton:hover { background-color: #505050; }
+        """)
+        btn_rebuild.setToolTip("重新扫描全市场历史数据，刷新答题模式题库")
+        btn_rebuild.clicked.connect(self._rebuild_bank_from_home)
+        tool_row.addWidget(btn_rebuild)
+        tool_row.addStretch()
+
+        self._home_hint = QLabel("")
+        self._home_hint.setStyleSheet("color: #888888; font-size: 13px;")
+        tool_row.addWidget(self._home_hint)
+        outer.addLayout(tool_row)
+
+        # 数据源不可用时在首页提示
+        if not (self.data_loader and self.data_loader.is_available()):
+            self._home_hint.setText("⚠ 未找到通达信数据目录，请到「高级设置」选择")
+
+        return page
+
+    def _start_mode_from_home(self, mode_key: str):
+        """首页点击模式卡片：切到训练页并启动训练。"""
+        keys = [c[0] for c in self.MODE_CARDS]
+        if mode_key in keys:
+            self.combo_mode.setCurrentIndex(keys.index(mode_key))
+        self.main_stack.setCurrentIndex(1)
+        self.start_training()
+
+    def _rebuild_bank_from_home(self):
+        """首页手动重建题库（构建完成后停留在首页）。"""
+        if not self.data_loader or not self.data_loader.is_available():
+            QMessageBox.warning(
+                self, "数据源不可用",
+                "未找到通达信数据目录，请先到「高级设置」选择。")
+            return
+        self._bank_build_reason = "manual"
+        self._quiz_build_bank()
+
+    def _go_home(self):
+        """返回首页。"""
+        if hasattr(self, "main_stack"):
+            self.main_stack.setCurrentIndex(0)
+            self.statusBar().showMessage("就绪 - 选择一种模式开始训练（F1 查看快捷键）")
 
     def _build_right_panel(self) -> QWidget:
         """构建右侧 Tab 面板。"""
@@ -1006,6 +1294,8 @@ class MainWindow(QMainWindow):
             if self.data_loader.is_available():
                 self.log(f"✅ 通达信目录: {self.data_loader.tdx_home}")
                 self.tdx_path_edit.setText(str(self.data_loader.tdx_home))
+                if hasattr(self, "_home_hint"):
+                    self._home_hint.setText("")
             else:
                 self.log("⚠ 未找到通达信数据目录，请手动选择")
         except Exception as e:
@@ -1123,6 +1413,8 @@ class MainWindow(QMainWindow):
         self.chart.render(self.cursor, sub_inds, overlays)
 
         self.training_active = True
+        if hasattr(self, "main_stack"):
+            self.main_stack.setCurrentIndex(1)   # 确保训练页可见
         if self.current_mode == "quiz":
             self.log(f"🎯 答题开始! 当前可见 {self.cursor}/{len(self.df)} 根K线")
         else:
@@ -1182,6 +1474,7 @@ class MainWindow(QMainWindow):
                 "约 3-5 分钟，之后可重复使用）。\n\n现在构建吗？")
             if ret != QMessageBox.Yes:
                 return
+            self._bank_build_reason = "quiz"
             self._quiz_build_bank()
             return
 
@@ -1211,7 +1504,11 @@ class MainWindow(QMainWindow):
     def _on_bank_built(self, count: int):
         self._hide_loading()
         self.log(f"✅ 题库构建完成，共 {count} 道题")
-        self._quiz_start_session()
+        if getattr(self, "_bank_build_reason", "quiz") == "quiz":
+            self._quiz_start_session()
+        else:
+            QMessageBox.information(
+                self, "题库已重建", f"题库构建完成，共 {count} 道题。")
 
     def _on_bank_failed(self, err_msg: str):
         self._hide_loading()
@@ -1503,8 +1800,9 @@ class MainWindow(QMainWindow):
         # 清理模式组件
         self._clear_mode_widgets()
 
-        # 训练小结弹窗（可选触发 AI 复盘）
+        # 训练小结弹窗（可选触发 AI 复盘），关闭后返回首页
         self._show_session_summary(summary_stats, quiz_answers)
+        self._go_home()
 
     def _show_session_summary(self, stats: dict, quiz_answers: list = None):
         """弹出训练小结，用户选择 AI 复盘时接续触发。"""
@@ -1516,6 +1814,18 @@ class MainWindow(QMainWindow):
                 self._on_ai_analysis_clicked()
         except Exception as e:
             self.log(f"⚠ 小结弹窗显示失败: {e}")
+
+    def _show_shortcut_help(self):
+        """快捷键速查。"""
+        QMessageBox.information(
+            self, "⌨ 快捷键速查",
+            "→ 前进  |  ← 后退  |  PgDn 快进10\n"
+            "1/2/3/4 买入 25%/33%/50%/100%\n"
+            "Shift+1/2/3/4 卖出对应仓位\n"
+            "↑ 买入(默认仓位)  ↓ 卖出(默认仓位)\n"
+            "Space 观望  |  Esc 结束训练\n\n"
+            "答题模式：1 买入 / 2 观望 / 3 清仓，回车下一题\n"
+            "（答题模式下交易与推进键自动屏蔽）")
     # ============================================================
     def _apply_sl_tp(self):
         """把面板里的止损/止盈百分比写入 trade_manager（0 表示不启用）。"""
@@ -1993,6 +2303,11 @@ class MainWindow(QMainWindow):
         """
         if modifiers is None:
             modifiers = Qt.NoModifier
+
+        # F1 / ? 快捷键速查（任何界面可用）
+        if key in (Qt.Key_F1, Qt.Key_Question):
+            self._show_shortcut_help()
+            return True
 
         # Qt 在 Shift+数字键时返回上档字符 key code，需归一化
         _SHIFT_NUM_MAP = {
