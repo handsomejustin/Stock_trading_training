@@ -16,7 +16,7 @@ try:
         QLabel, QLineEdit, QPushButton, QSpinBox, QComboBox, QTextEdit,
         QFileDialog, QGroupBox, QStatusBar, QCheckBox,
         QMessageBox, QSplitter, QTabWidget, QDoubleSpinBox,
-        QProgressDialog,
+        QProgressDialog, QDialog,
     )
     from PySide6.QtCore import Qt, QDateTime, QEvent, QThread, Signal, QTimer
     from PySide6.QtGui import QPalette, QColor, QFont, QIcon, QPainter, QPen, QAction
@@ -27,7 +27,7 @@ except ImportError:
         QLabel, QLineEdit, QPushButton, QSpinBox, QComboBox, QTextEdit,
         QFileDialog, QGroupBox, QStatusBar, QCheckBox,
         QMessageBox, QSplitter, QTabWidget, QDoubleSpinBox,
-        QProgressDialog,
+        QProgressDialog, QDialog,
     )
     from PyQt5.QtCore import Qt, QDateTime, QEvent, QThread, pyqtSignal as Signal, QTimer
     from PyQt5.QtGui import QPalette, QColor, QFont, QIcon, QPainter, QPen
@@ -99,6 +99,108 @@ class LoadingOverlay(QWidget):
 
     def cleanup(self):
         self.killTimer(self._timer)
+
+
+class SessionSummaryDialog(QDialog):
+    """
+    训练结束小结弹窗。
+
+    展示本次收益、对比持有不动、（答题模式）正确率，
+    并提供 AI 复盘入口。done(2) 表示用户点击了「AI 复盘」。
+    """
+
+    RET_AI = 2
+
+    def __init__(self, parent, stock_code: str, mode: str,
+                 stats: dict, quiz_answers: list = None):
+        super().__init__(parent)
+        self.setWindowTitle("训练小结")
+        self.setMinimumWidth(420)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        title = QLabel(f"📌 {stock_code} · {dict_mode_name(mode)}")
+        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #ffffff;")
+        layout.addWidget(title)
+
+        def _stat_row(label: str, value_text: str, color: str) -> QWidget:
+            row = QWidget()
+            h = QHBoxLayout(row)
+            h.setContentsMargins(0, 0, 0, 0)
+            lab = QLabel(label)
+            lab.setStyleSheet("color: #aaaaaa; font-size: 15px;")
+            val = QLabel(value_text)
+            val.setStyleSheet(f"color: {color}; font-size: 17px; font-weight: bold;")
+            h.addWidget(lab)
+            h.addStretch()
+            h.addWidget(val)
+            return row
+
+        sign = "+" if stats["total_return"] >= 0 else ""
+        layout.addWidget(_stat_row(
+            "本次收益（含浮动）", f"{sign}{stats['total_return']:.2f}%",
+            "#ff6666" if stats["total_return"] >= 0 else "#66ff66"))
+
+        sign = "+" if stats["buy_hold"] >= 0 else ""
+        layout.addWidget(_stat_row(
+            "持有不动", f"{sign}{stats['buy_hold']:.2f}%",
+            "#ff6666" if stats["buy_hold"] >= 0 else "#66ff66"))
+
+        excess = stats["total_return"] - stats["buy_hold"]
+        sign = "+" if excess >= 0 else ""
+        layout.addWidget(_stat_row(
+            "择时超额", f"{sign}{excess:.2f}%",
+            "#ff6666" if excess >= 0 else "#66ff66"))
+
+        layout.addWidget(_stat_row(
+            "交易次数", f"{stats['trade_count']} 次", "#cccccc"))
+
+        if quiz_answers:
+            n = len(quiz_answers)
+            correct = sum(1 for a in quiz_answers if a["is_correct"])
+            layout.addWidget(_stat_row(
+                "答题正确率", f"{correct}/{n} ({correct / n * 100:.0f}%)"
+                if n else "—", "#4a9eff"))
+
+        hint = QLabel("正的择时超额说明你的买卖点跑赢了「拿住不动」。")
+        hint.setStyleSheet("color: #888888; font-size: 13px;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        btn_row = QHBoxLayout()
+        btn_ai = QPushButton("🤖 AI 复盘")
+        btn_ai.setStyleSheet("""
+            QPushButton {
+                background-color: #2a4a6a; color: #ffffff;
+                padding: 8px 20px; border: 1px solid #4a9eff;
+                border-radius: 4px; font-size: 15px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #3a5a8a; }
+        """)
+        btn_ai.clicked.connect(lambda: self.done(self.RET_AI))
+        btn_close = QPushButton("关闭")
+        btn_close.setStyleSheet("""
+            QPushButton {
+                background-color: #3c3c3c; color: #cccccc;
+                padding: 8px 20px; border: 1px solid #555555;
+                border-radius: 4px; font-size: 15px;
+            }
+            QPushButton:hover { background-color: #505050; }
+        """)
+        btn_close.clicked.connect(self.accept)
+        btn_row.addStretch()
+        btn_row.addWidget(btn_ai)
+        btn_row.addWidget(btn_close)
+        layout.addLayout(btn_row)
+
+
+def dict_mode_name(mode: str) -> str:
+    """模式 key 转中文名。"""
+    return {
+        "classic": "经典模式", "timed": "限时模式", "multi_tf": "多周期模式",
+        "sector": "板块联动", "comprehensive": "综合训练", "quiz": "答题模式",
+    }.get(mode, mode)
 
 
 class LoadWorker(QThread):
@@ -1286,12 +1388,43 @@ class MainWindow(QMainWindow):
         self.chart.show_all(self.cursor)
         self._refresh_chart()
 
+        # 导出完整K线图 PNG（供 AI 视觉复盘）
+        self._last_chart_png = b""
+        try:
+            import io
+            buf = io.BytesIO()
+            self.chart.fig.savefig(
+                buf, format="png",
+                facecolor=self.chart.fig.get_facecolor())
+            self._last_chart_png = buf.getvalue()
+        except Exception as e:
+            self.log(f"⚠ 复盘图导出失败: {e}")
+
         # 计算时机评分
         self.trade_manager.score_all_timing(self.df)
 
         last_price = self.df.iloc[-1]["close"]
         summary = self.trade_manager.summary(last_price)
         self.log(summary)
+
+        # 小结数据（与 db.save_session 同口径）
+        completed = self.trade_manager.get_completed_trades()
+        total_return = sum(ct.return_pct for ct in completed)
+        if (self.trade_manager.portfolio.position > 0
+                and self.trade_manager.portfolio.avg_cost > 0):
+            total_return += (last_price / self.trade_manager.portfolio.avg_cost
+                             - 1.0) * 100.0
+        if len(self.df) > 30:
+            buy_hold = (last_price / self.df.iloc[30]["close"] - 1.0) * 100.0
+        else:
+            buy_hold = 0.0
+        win_count = sum(1 for ct in completed if ct.return_pct > 0)
+        summary_stats = {
+            "total_return": total_return,
+            "buy_hold": buy_hold,
+            "trade_count": len(completed),
+            "win_count": win_count,
+        }
 
         # 答题模式：收集作答记录
         quiz_answers = None
@@ -1369,6 +1502,20 @@ class MainWindow(QMainWindow):
 
         # 清理模式组件
         self._clear_mode_widgets()
+
+        # 训练小结弹窗（可选触发 AI 复盘）
+        self._show_session_summary(summary_stats, quiz_answers)
+
+    def _show_session_summary(self, stats: dict, quiz_answers: list = None):
+        """弹出训练小结，用户选择 AI 复盘时接续触发。"""
+        try:
+            dlg = SessionSummaryDialog(
+                self, self.stock_code or "未知", self.current_mode,
+                stats, quiz_answers)
+            if dlg.exec() == SessionSummaryDialog.RET_AI:
+                self._on_ai_analysis_clicked()
+        except Exception as e:
+            self.log(f"⚠ 小结弹窗显示失败: {e}")
     # ============================================================
     def _apply_sl_tp(self):
         """把面板里的止损/止盈百分比写入 trade_manager（0 表示不启用）。"""
@@ -1424,6 +1571,10 @@ class MainWindow(QMainWindow):
         self.log("✅ AI 分析完成!")
         self.btn_ai_analysis.setEnabled(True)
         self.btn_ai_analysis.setText("🤖 AI 分析")
+
+        worker = getattr(self.ai_analyzer, "worker", None)
+        if getattr(worker, "degraded", False):
+            self.log("ℹ 当前模型不支持图片输入，已自动降级为纯文本分析。")
 
         # 1) 显示在日志中
         self.log("──── AI 复盘分析 ────")
@@ -1496,10 +1647,16 @@ class MainWindow(QMainWindow):
         self.btn_ai_analysis.setText("🤖 分析中...")
         self.log("🤖 正在调用 AI 分析，请稍候（最长约 2 分钟）...")
 
+        # 视觉复盘：把完整K线图一并发给模型（模型不支持时自动降级纯文本）
+        chart_png = None
+        if self.config.get("ai", {}).get("send_chart", True):
+            chart_png = getattr(self, "_last_chart_png", b"") or None
+
         self.ai_analyzer.analyze_async(
             report_text, summary,
             on_success=lambda text: self._on_ai_success(text, report_path),
             on_error=self._on_ai_error,
+            chart_png=chart_png,
         )
 
     def _on_export_prompt_clicked(self):
@@ -1590,6 +1747,8 @@ class MainWindow(QMainWindow):
             "base_url": self.edit_base_url.text(),
             "model": self.edit_model.text(),
             "auth_style": self.combo_ai_auth_style.currentText(),
+            # 非面板项：保留原值（无则取默认）
+            "send_chart": self.config.get("ai", {}).get("send_chart", True),
         }
         # 更新 AI analyzer 的配置引用
         self.ai_analyzer.config = self.config

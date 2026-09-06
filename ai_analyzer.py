@@ -6,6 +6,7 @@
 API 调用在 QThread 中异步执行，不阻塞 UI。
 """
 
+import base64
 import json
 
 # PySide6/PyQt5 兼容
@@ -58,11 +59,14 @@ class AIWorker(QThread):
     finished = Signal(str)   # 成功：分析文本
     error = Signal(str)      # 失败：错误消息
 
-    def __init__(self, config: dict, report_text: str, trade_summary: str):
+    def __init__(self, config: dict, report_text: str, trade_summary: str,
+                 chart_png: bytes = None):
         super().__init__()
         self.config = config
         self.report_text = report_text
         self.trade_summary = trade_summary
+        self.chart_png = chart_png
+        self.degraded = False   # True = 视觉请求被拒，已降级为纯文本
 
     def run(self) -> None:
         """执行 API 调用。"""
@@ -72,24 +76,40 @@ class AIWorker(QThread):
                 trade_summary=self.trade_summary,
             )
             provider = self.config.get("ai", {}).get("provider", "")
-            response = self._call_api(provider, prompt)
+            chart_b64 = None
+            if self.chart_png:
+                chart_b64 = base64.b64encode(self.chart_png).decode("ascii")
+
+            try:
+                response = self._call_api(provider, prompt, chart_b64)
+            except requests.exceptions.HTTPError as e:
+                # 模型不支持视觉输入（纯文本模型如 deepseek-chat 等）时
+                # 服务端通常返回 4xx → 自动降级重发纯文本
+                status = getattr(e.response, "status_code", None)
+                if chart_b64 and status in (400, 404, 413, 415, 422):
+                    self.degraded = True
+                    response = self._call_api(provider, prompt, None)
+                else:
+                    raise
             self.finished.emit(response)
         except Exception as e:
             self.error.emit(str(e))
 
-    def _call_api(self, provider: str, prompt: str) -> str:
+    def _call_api(self, provider: str, prompt: str,
+                  chart_b64: str = None) -> str:
         """根据 provider 路由到对应的 API 调用。"""
         ai_config = self.config.get("ai", {})
         api_key = ai_config.get("api_key", "")
 
         if provider in ("openai", "deepseek", "custom"):
-            return self._call_openai_compat(ai_config, prompt)
+            return self._call_openai_compat(ai_config, prompt, chart_b64)
         elif provider == "anthropic":
-            return self._call_anthropic(api_key, ai_config, prompt)
+            return self._call_anthropic(api_key, ai_config, prompt, chart_b64)
         else:
             raise ValueError(f"未知的 AI provider: {provider}")
 
-    def _call_openai_compat(self, ai_config: dict, prompt: str) -> str:
+    def _call_openai_compat(self, ai_config: dict, prompt: str,
+                            chart_b64: str = None) -> str:
         """
         调用 OpenAI 兼容 API（覆盖 openai / deepseek / custom）。
         """
@@ -121,10 +141,19 @@ class AIWorker(QThread):
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
+        # 视觉模型：文本 + K线图并列的多模态 content
+        if chart_b64:
+            content = [
+                {"type": "text", "text": prompt},
+                {"type": "image_url",
+                 "image_url": {"url": f"data:image/png;base64,{chart_b64}"}},
+            ]
+        else:
+            content = prompt
         payload = {
             "model": model,
             "messages": [
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": content},
             ],
             "temperature": 0.7,
             "max_tokens": 4000,
@@ -137,7 +166,7 @@ class AIWorker(QThread):
         return data["choices"][0]["message"]["content"]
 
     def _call_anthropic(self, api_key: str, ai_config: dict,
-                        prompt: str) -> str:
+                        prompt: str, chart_b64: str = None) -> str:
         """调用 Anthropic Claude API。"""
         model = ai_config.get("model", "claude-sonnet-4-6")
         base_url = ai_config.get("base_url", "") or "https://api.anthropic.com"
@@ -155,11 +184,21 @@ class AIWorker(QThread):
             headers["Authorization"] = f"Bearer {api_key}"
         else:
             headers["x-api-key"] = api_key
+        # 视觉模型：K线图 + 文本并列的 content blocks
+        if chart_b64:
+            content = [
+                {"type": "image",
+                 "source": {"type": "base64", "media_type": "image/png",
+                            "data": chart_b64}},
+                {"type": "text", "text": prompt},
+            ]
+        else:
+            content = prompt
         payload = {
             "model": model,
             "max_tokens": 4000,
             "messages": [
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": content},
             ],
         }
 
@@ -193,7 +232,7 @@ class AIAnalyzer:
         return bool(provider and api_key)
 
     def analyze_async(self, report_text: str, trade_summary: str,
-                      on_success, on_error) -> None:
+                      on_success, on_error, chart_png: bytes = None) -> None:
         """
         异步分析（不阻塞 UI）。
 
@@ -202,6 +241,7 @@ class AIAnalyzer:
             trade_summary: 交易总结文本
             on_success: 成功回调，参数为分析文本
             on_error: 失败回调，参数为错误消息
+            chart_png: 可选 K 线截图 PNG 字节，一并交给视觉模型分析
         """
         if not self.is_configured():
             on_error("AI 未配置，请先设置 provider 和 API Key")
@@ -211,7 +251,8 @@ class AIAnalyzer:
         if self.worker and self.worker.isRunning():
             self.worker.wait(5000)
 
-        self.worker = AIWorker(self.config, report_text, trade_summary)
+        self.worker = AIWorker(self.config, report_text, trade_summary,
+                               chart_png)
         self.worker.finished.connect(on_success)
         self.worker.error.connect(on_error)
         self.worker.start()
