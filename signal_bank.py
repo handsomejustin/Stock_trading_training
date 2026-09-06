@@ -1,16 +1,18 @@
 """
 盘感训练器 - 信号题库引擎
 
-扫描全市场日线数据，检测 6 类经典选时信号事件，预计算事件后
-5/10/20 日的前瞻收益，缓存到独立的 signal_bank.db（与训练记录库分离）。
+扫描股票日线数据（默认随机抽样），检测 6 类经典选时信号事件，
+预计算事件后 5/10/20 日的前瞻收益，缓存到独立的 signal_bank.db
+（与训练记录库分离）。
 
-答题模式的批分依据是信号的【历史统计基率】（该信号历史上出现后的
-上涨概率 / 平均收益），而非单次事件的实际结果——奖励"做期望为正的事"，
-不奖励运气。单次事件的实际走势仅在揭晓时展示。
+答题模式的判分依据是【该题个股的实际走势】：持币时买入后涨了就对、
+持股时卖出后跌了就对（见 grade_choice）。信号的历史统计基率仅作为
+揭晓时的参考信息展示。
 
 纯 pandas/numpy 实现，不依赖 Qt，可供脚本独立运行自测。
 """
 
+import random
 import sqlite3
 import sys
 from datetime import datetime
@@ -140,6 +142,37 @@ SIGNAL_DEFS = {
 WARMUP_BARS = 60
 FORWARD_BARS = 20
 
+# 判分横盘带：20日前瞻收益在 ±0.1% 内视为横盘，两种选择都算对
+FLAT_BAND_PCT = 0.1
+
+POSITION_TEXT = {"cash": "持币", "held": "持股"}
+
+
+def grade_choice(position: str, choice: str,
+                 fwd20: float) -> tuple[bool, str]:
+    """
+    按题目个股的实际走势判分（而非信号的历史基率）。
+
+    - 持币（空仓）：买入 vs 观望 —— 之后上涨则买入对，下跌则观望对
+    - 持股（持仓）：卖出 vs 观望 —— 之后下跌则卖出对，上涨则观望对
+    - 横盘（|fwd20| ≤ 0.1%）：两种选择都算对
+    - 前瞻数据缺失：不判负
+
+    Returns:
+        (is_correct, correct_choice)
+    """
+    if fwd20 is None:
+        return True, choice
+    up = fwd20 > FLAT_BAND_PCT
+    down = fwd20 < -FLAT_BAND_PCT
+    if position == "held":
+        correct = "sell" if down else "hold"
+    else:
+        correct = "buy" if up else "hold"
+    if not up and not down:
+        return True, correct
+    return choice == correct, correct
+
 
 class SignalBank:
     """
@@ -157,6 +190,8 @@ class SignalBank:
     GLOBAL_CAP = 2000
     # 每只股票只检测最近 N 根 K 线内的事件（约10年）
     RECENT_BARS = 2500
+    # 默认随机抽取的股票数量（100只即可秒级建库，重建可换一批新题）
+    SAMPLE_STOCKS = 100
 
     def __init__(self, db_path: str = None):
         if db_path is None:
@@ -173,6 +208,11 @@ class SignalBank:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        # WAL：构建期间读不阻塞写、提交不阻塞读
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.DatabaseError:
+            pass
         return conn
 
     def _create_tables(self, conn: sqlite3.Connection) -> None:
@@ -232,14 +272,16 @@ class SignalBank:
     # ============================================================
     # 构建
     # ============================================================
-    def build(self, data_loader, progress_cb=None, stock_limit: int = 0) -> int:
+    def build(self, data_loader, progress_cb=None,
+              stock_sample: int = None) -> int:
         """
-        全市场扫描并重建题库。
+        扫描股票并重建题库（默认随机抽取 SAMPLE_STOCKS 只）。
 
         Args:
             data_loader: DataLoader 实例（须已可用）
-            progress_cb: 可选回调 progress_cb(text)，每 100 只股票汇报一次
-            stock_limit: 仅扫描前 N 只股票（自测用，0 = 不限制）
+            progress_cb: 可选回调 progress_cb(text)，每 50 只股票汇报一次
+            stock_sample: 随机抽取的股票数；None = 用 SAMPLE_STOCKS，
+                          0 = 全市场，N = 抽 N 只
 
         Returns:
             int: 入库事件总数
@@ -247,8 +289,10 @@ class SignalBank:
         stocks = data_loader.scan_stocks()
         if not stocks:
             raise ValueError("未扫描到任何股票数据，请检查通达信数据目录")
-        if stock_limit > 0:
-            stocks = stocks[:stock_limit]
+        if stock_sample is None:
+            stock_sample = self.SAMPLE_STOCKS
+        if stock_sample and 0 < stock_sample < len(stocks):
+            stocks = random.sample(stocks, stock_sample)
 
         conn = self._connect()
         try:
@@ -405,35 +449,18 @@ class SignalBank:
         finally:
             conn.close()
 
-    @staticmethod
-    def correct_action(stats: dict) -> str:
-        """
-        由历史统计基率推导标准动作。
-
-        - 20日上涨概率 ≥ 55% 且平均收益 ≥ +0.5% → 买入（期望为正）
-        - 20日上涨概率 ≤ 45% 且平均收益 ≤ -0.5% → 清仓（期望为负）
-        - 其余 → 观望（无显著优势）
-        """
-        if not stats or stats.get("sample_n", 0) < 30:
-            return "hold"       # 样本不足，保守观望
-        up20, avg20 = stats["up20_rate"], stats["avg20"]
-        if up20 >= 0.55 and avg20 >= 0.5:
-            return "buy"
-        if up20 <= 0.45 and avg20 <= -0.5:
-            return "sell"
-        return "hold"
-
     def draw_question(self, signal_id: str = None) -> dict:
         """
-        随机抽取一道题。
+        随机抽取一道题（随机指定持仓状态：持币或持股）。
 
         Args:
             signal_id: 指定信号；None 则全信号随机
 
         Returns:
             dict: code/date/signal_id/signal_name/close/fwd*/max_* +
-                  stats(历史统计 dict) + correct(标准动作)；
-                  题库为空时返回 None
+                  stats(历史统计 dict，仅供揭晓时参考) +
+                  position(cash=持币 / held=持股)；
+                  题库为空时返回 None。判分用模块级 grade_choice()。
         """
         conn = self._connect()
         try:
@@ -449,7 +476,7 @@ class SignalBank:
             event = dict(row)
             event["signal_name"] = SIGNAL_DEFS[event["signal_id"]]["name"]
             event["stats"] = self.get_stats(event["signal_id"])
-            event["correct"] = self.correct_action(event["stats"])
+            event["position"] = random.choice(("cash", "held"))
             return event
         finally:
             conn.close()
@@ -469,7 +496,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     if limit > 0:
-        print(f"⚠ 自测模式：仅扫描前 {limit} 只股票")
+        print(f"⚠ 自测模式：随机抽取 {limit} 只股票")
 
     bank = SignalBank(db_path=str(Path(__file__).parent / "signal_bank_test.db"))
     import time
@@ -478,7 +505,7 @@ if __name__ == "__main__":
     def _p(text):
         print(f"  {text}  [{time.time() - t0:.0f}s]")
 
-    total = bank.build(dl, progress_cb=_p, stock_limit=limit)
+    total = bank.build(dl, progress_cb=_p, stock_sample=limit)
     print(f"✅ 题库构建完成: {total} 个事件, 耗时 {time.time() - t0:.0f}s")
 
     conn = bank._connect()
@@ -489,10 +516,13 @@ if __name__ == "__main__":
             print(f"  {SIGNAL_DEFS[d['signal_id']]['name']:<12} "
                   f"样本{d['sample_n']:>6} | 5日涨{d['up5_rate']:.1%} 均{d['avg5']:+.2f}% | "
                   f"20日涨{d['up20_rate']:.1%} 均{d['avg20']:+.2f}% | "
-                  f"盈亏比{d['profit_factor']} | 标准动作={bank.correct_action(d)}")
+                  f"盈亏比{d['profit_factor']}")
     conn.close()
 
     q = bank.draw_question()
     if q:
+        ok, correct = grade_choice(q["position"], "buy" if q["position"] == "cash"
+                                   else "sell", q["fwd20"])
         print(f"\n抽题验证: {q['code']} {q['date']} {q['signal_name']} "
-              f"fwd20={q['fwd20']}% 正确={q['correct']}")
+              f"持仓={POSITION_TEXT[q['position']]} fwd20={q['fwd20']}% "
+              f"若选第一个选项→{'对' if ok else '错'}(应选={correct})")

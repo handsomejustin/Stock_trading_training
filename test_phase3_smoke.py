@@ -93,4 +93,40 @@ assert cfg["ai"].get("send_chart") is True
 assert cfg["mode"].get("quiz_questions") == 10
 print("config defaults OK")
 
+# ---- 8. H1 回归:_save_mode_config 不得洗掉 quiz_questions ----
+orig_save = app_main.save_config
+app_main.save_config = lambda cfg: None
+saved_mode = dict(w.config.get("mode", {}))
+try:
+    w.config.setdefault("mode", {})["quiz_questions"] = 25
+    w._save_mode_config()
+    assert w.config["mode"].get("quiz_questions") == 25
+finally:
+    app_main.save_config = orig_save
+    w.config["mode"] = saved_mode   # 恢复现场,防止后续保存把测试值落盘
+print("H1: save_mode_config preserves quiz_questions OK")
+
+# ---- 9. M3 回归:训练中禁止切入答题模式 ----
+shown_msgs = []
+orig_info = app_main.QMessageBox.information
+app_main.QMessageBox.information = lambda *a, **k: shown_msgs.append(1)
+try:
+    w._on_load_done(df, "SH600000", hub, 30)      # 经典模式训练中
+    w.combo_mode.setCurrentIndex(5)               # 尝试切到答题模式
+    assert w.current_mode == "classic", "训练中切答题应被阻止"
+    assert w.combo_mode.currentIndex() == 0, "应回退到原模式"
+    assert shown_msgs, "应有提示"
+finally:
+    app_main.QMessageBox.information = orig_info
+    w.end_training()
+print("M3: mode switch blocked during training OK")
+
+# ---- 10. M1 回归:会话结束后的迟到题目回调被丢弃 ----
+w.training_active = False
+w.quiz_state = None
+w._on_quiz_load_done(df, "SH600000", hub, 30, 100,
+                     {"code": "SH600000", "date": "2024-01-02"})
+assert w.training_active is False, "迟到回调不得复活会话"
+print("M1: stale quiz callback ignored OK")
+
 print("\n=== PHASE 3 SMOKE TESTS PASSED ===")

@@ -23,18 +23,35 @@ sp = StatsPanel(db2)
 sp.refresh()
 print("StatsPanel OK")
 
-from signal_bank import SignalBank
+from signal_bank import SignalBank, grade_choice
+
+# ---- grade_choice 判分单元测试 ----
+assert grade_choice("cash", "buy", 5.0) == (True, "buy")      # 持币买入后涨→对
+assert grade_choice("cash", "hold", 5.0) == (False, "buy")    # 持币观望错过涨→错
+assert grade_choice("cash", "hold", -5.0) == (True, "hold")   # 持币观望躲过跌→对
+assert grade_choice("held", "sell", -5.0) == (True, "sell")   # 持股卖出躲过跌→对
+assert grade_choice("held", "sell", 5.0) == (False, "hold")   # 持股卖飞→错
+assert grade_choice("cash", "buy", 0.05) == (True, "hold")    # 横盘:都对
+assert grade_choice("held", "hold", -0.05) == (True, "hold")  # 横盘:都对
+assert grade_choice("cash", "buy", None) == (True, "buy")     # 缺数据不判负
+print("grade_choice OK")
 
 bank = SignalBank(db_path="signal_bank_test.db")
 q = bank.draw_question()
+assert q and q["position"] in ("cash", "held")
 
 panel = quiz_panel.QuizPanel(advance_cb=lambda: None, reveal_bars=20)
 records = []
 panel.answered.connect(records.append)
 panel.begin_question(1, 10, q)
+assert len(panel._choice_keys) == 2, "持仓二选一"
 panel.answer_from_key(0)
 assert not panel._question_active and len(records) == 1
-assert records[0]["is_correct"] == (records[0]["correct_choice"] == "buy")
+first_choice = "buy" if q["position"] == "cash" else "sell"
+exp_correct, exp_choice = grade_choice(q["position"], first_choice, q["fwd20"])
+assert records[0]["is_correct"] == exp_correct
+assert records[0]["correct_choice"] == exp_choice
+assert records[0]["position"] == q["position"]
 assert panel._reveal_shown and panel._play_timer.isActive()
 panel.try_next()
 print("QuizPanel OK:", records[0]["user_choice"], records[0]["correct_choice"],
@@ -78,8 +95,10 @@ event_cursor = (n - 21) + 1
 w._on_load_done(df, q["code"], hub, 30, event_cursor, q)
 assert w.quiz_panel is not None and w.training_active
 assert w.cursor == event_cursor, w.cursor
-w.quiz_panel.answer_from_key(1)
+w.quiz_panel.answer_from_key(1)   # 第二个选项恒为「观望」
 assert len(w.quiz_state["answers"]) == 1
+exp2 = grade_choice(q["position"], "hold", q["fwd20"])[0]
+assert w.quiz_state["answers"][0]["is_correct"] == exp2
 print("quiz flow (load→begin→answer) OK, cursor at event day:", w.cursor)
 
 # 按键分发:quiz 状态下 1/2/3 走作答,方向键被屏蔽,揭晓态不能重复作答

@@ -1471,8 +1471,9 @@ class MainWindow(QMainWindow):
         if not self.signal_bank.is_built():
             ret = QMessageBox.question(
                 self, "构建题库",
-                "首次使用答题模式需要构建题库（扫描全市场历史数据，"
-                "约 3-5 分钟，之后可重复使用）。\n\n现在构建吗？")
+                "首次使用答题模式需要构建题库（随机抽取约 100 只股票的"
+                "历史数据，约 1 分钟，之后可重复使用；首页「重建题库」"
+                "可随时换一批新题）。\n\n现在构建吗？")
             if ret != QMessageBox.Yes:
                 return
             self._bank_build_reason = "quiz"
@@ -1480,12 +1481,16 @@ class MainWindow(QMainWindow):
             return
 
         total = int(self.config.get("mode", {}).get("quiz_questions", 10))
-        self.quiz_state = {"total": total, "no": 0, "answers": []}
-        self.log(f"🎯 答题模式开始，共 {total} 题。按 1/2/3 作答，回车下一题。")
+        self.quiz_state = {"total": total, "no": 0, "answers": [],
+                           "pending": False}
+        self.log(f"🎯 答题模式开始，共 {total} 题。按 1/2 作答，回车下一题。")
         self._quiz_load_question()
 
     def _quiz_build_bank(self):
-        """后台构建题库，带进度遮罩。"""
+        """后台构建题库，带进度遮罩（重复触发直接忽略）。"""
+        if (getattr(self, "_bank_worker", None) is not None
+                and self._bank_worker.isRunning()):
+            return
         self._loading_overlay = LoadingOverlay(self.centralWidget())
         self._loading_overlay.set_text("准备构建题库")
         self._loading_overlay.show()
@@ -1517,23 +1522,35 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "题库构建失败", err_msg)
 
     def _quiz_load_question(self):
-        """从题库抽题并后台加载对应股票数据。"""
-        event = self.signal_bank.draw_question()
+        """从题库抽题并后台加载对应股票数据（在途时忽略重复触发）。"""
+        if not self.quiz_state:
+            return
+        if (getattr(self, "_quiz_worker", None) is not None
+                and self._quiz_worker.isRunning()):
+            return
+
+        try:
+            event = self.signal_bank.draw_question()
+        except Exception as e:
+            QMessageBox.warning(
+                self, "题库读取失败",
+                f"读取题库出错：{e}\n可回首页点「重建题库」后重试。")
+            return
         if event is None:
             QMessageBox.warning(
                 self, "题库为空",
                 "题库中没有题目。请通过菜单或重新进入答题模式构建题库。")
             return
 
-        self.quiz_state["no"] += 1
         ma_periods = self.config.get("ma_periods", [5, 10, 20, 30, 60, 120])
 
         self._loading_overlay = LoadingOverlay(self.centralWidget())
         self._loading_overlay.set_text(
-            f"加载第 {self.quiz_state['no']}/{self.quiz_state['total']} 题")
+            f"加载第 {self.quiz_state['no'] + 1}/{self.quiz_state['total']} 题")
         self._loading_overlay.show()
         self._loading_overlay.raise_()
 
+        self.quiz_state["pending"] = True
         self._quiz_worker = QuizLoadWorker(
             self.data_loader, ma_periods, self.config, event)
         self._quiz_worker.finished_ok.connect(self._on_quiz_load_done)
@@ -1542,7 +1559,14 @@ class MainWindow(QMainWindow):
 
     def _on_quiz_load_done(self, df, stock_code, hub, warmup,
                            start_cursor, event):
-        """题目数据加载完成 → 复用统一加载回调展示题目。"""
+        """题目数据加载完成；会话已结束的迟到回调直接丢弃。"""
+        if (not self.quiz_state
+                or not self.quiz_state.get("pending")):
+            self._hide_loading()
+            self.log("ℹ 已忽略迟到的题目加载结果")
+            return
+        self.quiz_state["pending"] = False
+        self.quiz_state["no"] += 1
         self._on_load_done(df, stock_code, hub, warmup, start_cursor, event)
 
     def _on_quiz_answered(self, record: dict):
@@ -1724,10 +1748,12 @@ class MainWindow(QMainWindow):
             "win_count": win_count,
         }
 
-        # 答题模式：收集作答记录
+        # 答题模式：收集作答记录并立即封存会话
+        # （置 None 防止在途加载的迟到回调复活会话、二次入库）
         quiz_answers = None
         if self.current_mode == "quiz" and self.quiz_state:
             quiz_answers = self.quiz_state["answers"]
+            self.quiz_state = None
 
         # 生成报告
         report_path = ""
@@ -1825,8 +1851,22 @@ class MainWindow(QMainWindow):
             "Shift+1/2/3/4 卖出对应仓位\n"
             "↑ 买入(默认仓位)  ↓ 卖出(默认仓位)\n"
             "Space 观望  |  Esc 结束训练\n\n"
-            "答题模式：1 买入 / 2 观望 / 3 清仓，回车下一题\n"
-            "（答题模式下交易与推进键自动屏蔽）")
+            "答题模式：持币时 1 买入 / 2 观望；持股时 1 卖出 / 2 观望\n"
+            "回车下一题（答题中交易与推进键自动屏蔽）")
+
+    def closeEvent(self, event):
+        """退出前等待在途后台线程，避免 QThread 运行中被销毁导致崩溃。"""
+        threads = [
+            getattr(self, attr, None)
+            for attr in ("_load_worker", "_quiz_worker", "_bank_worker",
+                         "_update_check_thread", "_manual_check_thread",
+                         "_update_download_thread")
+        ]
+        threads.append(getattr(self.ai_analyzer, "worker", None))
+        for t in threads:
+            if t is not None and t.isRunning():
+                t.wait(3000)
+        super().closeEvent(event)
     # ============================================================
     def _apply_sl_tp(self):
         """把面板里的止损/止盈百分比写入 trade_manager（0 表示不启用）。"""
@@ -2071,6 +2111,9 @@ class MainWindow(QMainWindow):
             "current": self.current_mode,
             "timed_seconds": int(self.combo_timed_seconds.currentText()),
             "sector_peer_count": self.spin_peer_count.value(),
+            # 非面板项：保留原值（无则取默认），防止整体替换洗掉用户配置
+            "quiz_questions": self.config.get("mode", {}).get(
+                "quiz_questions", 10),
         }
         save_config(self.config)
 
@@ -2120,7 +2163,27 @@ class MainWindow(QMainWindow):
         modes = ["classic", "timed", "multi_tf", "sector", "comprehensive", "quiz"]
         if index < 0 or index >= len(modes):
             return
-        self.current_mode = modes[index]
+        target = modes[index]
+
+        # 训练进行中禁止切入/切出答题模式（防止空面板软锁/作答记录静默丢失）
+        if (self.training_active and self.df is not None
+                and target != self.current_mode):
+            entering_quiz = target == "quiz"
+            leaving_quiz = (self.current_mode == "quiz"
+                            and self.quiz_state is not None)
+            if entering_quiz or leaving_quiz:
+                msg = ("答题会话进行中，已答题目尚未保存。"
+                       "请先按 Esc 结束本次答题，再切换模式。"
+                       if leaving_quiz else
+                       "当前训练尚未结束。请先按 Esc 结束训练，"
+                       "再进入答题模式。")
+                QMessageBox.information(self, "暂不能切换", msg)
+                self.combo_mode.blockSignals(True)
+                self.combo_mode.setCurrentIndex(modes.index(self.current_mode))
+                self.combo_mode.blockSignals(False)
+                return
+
+        self.current_mode = target
 
         self.timed_config_widget.setVisible(
             self.current_mode in ("timed", "comprehensive"))
@@ -2321,7 +2384,8 @@ class MainWindow(QMainWindow):
             key, _ = _SHIFT_NUM_MAP[key]
             modifiers |= Qt.ShiftModifier
 
-        # 答题模式：1/2/3 作答，回车下一题，Esc 结束；屏蔽交易与推进键
+        # 答题模式：1/2 作答（按持仓状态是 买/观望 或 卖/观望），
+        # 回车下一题，Esc 结束；屏蔽交易与推进键
         if (self.current_mode == "quiz" and self.training_active
                 and self.quiz_panel is not None):
             if key == Qt.Key_Escape:

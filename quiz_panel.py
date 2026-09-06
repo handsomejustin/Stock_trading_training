@@ -18,6 +18,7 @@ except ImportError:
     from PyQt5.QtCore import Qt, pyqtSignal as Signal, QTimer, QThread
 
 from indicators import IndicatorHub
+from signal_bank import FLAT_BAND_PCT, POSITION_TEXT, grade_choice
 
 
 # ============================================================
@@ -95,21 +96,22 @@ class BankBuildWorker(QThread):
 # ============================================================
 class QuizPanel(QWidget):
     """
-    答题模式面板：出题 → 作答（按钮或 1/2/3 键）→ 自动播放 20 根 → 揭晓。
+    答题模式面板：出题 → 作答（按钮或 1/2 键）→ 自动播放 20 根 → 揭晓。
 
-    批分依据是该信号的历史统计基率（standard action），
-    单次事件的实际走势仅作揭晓展示。
+    题目指定持仓状态：持币时选「买入/观望」，持股时选「卖出/观望」。
+    判分依据是该题个股之后 20 日的实际涨跌（见 signal_bank.grade_choice），
+    历史基率仅作揭晓参考。
     """
 
     answered = Signal(dict)        # 一题的作答记录（主窗口收集入库）
     next_requested = Signal()      # 请求下一题（按钮或回车）
 
-    CHOICES = [
-        ("buy", "1 买入"),
-        ("hold", "2 观望"),
-        ("sell", "3 清仓"),
-    ]
-    CHOICE_TEXT = {"buy": "买入", "hold": "观望", "sell": "清仓"}
+    # 每种持仓状态的选项（按键 1/2）
+    CHOICE_SETS = {
+        "cash": [("buy", "1 买入"), ("hold", "2 观望")],
+        "held": [("sell", "1 卖出"), ("hold", "2 观望")],
+    }
+    CHOICE_TEXT = {"buy": "买入", "hold": "观望", "sell": "卖出"}
 
     def __init__(self, parent=None, advance_cb=None, reveal_bars: int = 20):
         super().__init__(parent)
@@ -121,6 +123,7 @@ class QuizPanel(QWidget):
         self._reveal_shown = False
         self._current = None          # 当前题 event dict
         self._played = 0
+        self._choice_keys = []        # 当前题 index → choice 映射
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 4, 6, 4)
@@ -144,13 +147,13 @@ class QuizPanel(QWidget):
         btn_styles = [
             ("background-color: #5a2020; color: #ff6666; "
              "border: 1px solid #ff4444;"),
-            ("background-color: #4a4220; color: #ffd700; "
-             "border: 1px solid #ffd700;"),
             ("background-color: #1a4a1a; color: #66ff66; "
              "border: 1px solid #00cc00;"),
+            ("background-color: #4a4220; color: #ffd700; "
+             "border: 1px solid #ffd700;"),
         ]
-        for (choice, text), style in zip(self.CHOICES, btn_styles):
-            btn = QPushButton(text)
+        for i, style in enumerate(btn_styles):
+            btn = QPushButton("")
             btn.setFocusPolicy(Qt.NoFocus)
             btn.setStyleSheet(f"""
                 QPushButton {{
@@ -160,7 +163,8 @@ class QuizPanel(QWidget):
                 QPushButton:hover {{ background-color: #3a3a3a; }}
                 QPushButton:disabled {{ color: #666666; border-color: #444444; }}
             """)
-            btn.clicked.connect(lambda _=False, c=choice: self._do_answer(c))
+            btn.clicked.connect(
+                lambda _=False, idx=i: self._answer_by_index(idx))
             q_layout.addWidget(btn)
             self._choice_buttons.append(btn)
         layout.addWidget(self._question_row)
@@ -210,23 +214,38 @@ class QuizPanel(QWidget):
         self._reveal_shown = False
         self._played = 0
 
+        position = event.get("position", "cash")
+        self._choice_keys = [c for c, _ in self.CHOICE_SETS[position]]
+        for i, btn in enumerate(self._choice_buttons):
+            if i < len(self._choice_keys):
+                _, text = self.CHOICE_SETS[position][i]
+                btn.setText(text)
+                btn.setVisible(True)
+                btn.setEnabled(True)
+            else:
+                btn.setVisible(False)
+
         self._title.setText(
             f"🎯 第 {no}/{total} 题 · {event['signal_name']}"
             f"（{event['code']} · {event['date']}）")
         self._qinfo.setText(
-            f"该日出现「{event['signal_name']}」，假设你正关注此股，下一步？")
+            f"当前{POSITION_TEXT[position]}。该日出现"
+            f"「{event['signal_name']}」—— 你会怎么做？")
         self._reveal_row.hide()
         self._question_row.show()
-        for btn in self._choice_buttons:
-            btn.setEnabled(True)
 
     # ============================================================
     # 作答
     # ============================================================
     def answer_from_key(self, index: int) -> None:
-        """键盘 1/2/3 作答（index 0..2）。"""
-        if 0 <= index < len(self.CHOICES) and self._question_active:
-            self._do_answer(self.CHOICES[index][0])
+        """键盘数字作答（index 从 0）。"""
+        if (self._question_active
+                and 0 <= index < len(self._choice_keys)):
+            self._do_answer(self._choice_keys[index])
+
+    def _answer_by_index(self, index: int) -> None:
+        if self._question_active and 0 <= index < len(self._choice_keys):
+            self._do_answer(self._choice_keys[index])
 
     def _do_answer(self, choice: str) -> None:
         if not self._question_active or self._current is None:
@@ -236,8 +255,9 @@ class QuizPanel(QWidget):
             btn.setEnabled(False)
 
         event = self._current
-        correct = event.get("correct", "hold")
-        is_correct = choice == correct
+        fwd20 = event.get("fwd20")
+        position = event.get("position", "cash")
+        is_correct, correct = grade_choice(position, choice, fwd20)
         stats = event.get("stats") or {}
 
         record = {
@@ -246,13 +266,14 @@ class QuizPanel(QWidget):
             "signal_name": event["signal_name"],
             "code": event["code"],
             "date": event["date"],
+            "position": position,
             "user_choice": choice,
             "correct_choice": correct,
             "is_correct": is_correct,
             "stats": stats,
             "fwd5": event.get("fwd5"),
             "fwd10": event.get("fwd10"),
-            "fwd20": event.get("fwd20"),
+            "fwd20": fwd20,
             "max_gain20": event.get("max_gain20"),
             "max_dd20": event.get("max_dd20"),
         }
@@ -266,30 +287,35 @@ class QuizPanel(QWidget):
         correct = record["correct_choice"]
         user = record["user_choice"]
         stats = record.get("stats") or {}
+        fwd20 = record.get("fwd20")
+
+        if fwd20 is None:
+            actual = "无后续行情数据"
+        else:
+            trend = ("上涨" if fwd20 > FLAT_BAND_PCT
+                     else "下跌" if fwd20 < -FLAT_BAND_PCT else "横盘")
+            actual = f"20日后 {fwd20:+.1f}%（{trend}）"
 
         if record["is_correct"]:
-            self._verdict.setText(
-                f"✅ 回答正确 · 标准动作:{self.CHOICE_TEXT[correct]}")
+            self._verdict.setText(f"✅ 回答正确 · {actual}")
             self._verdict.setStyleSheet(
                 "color: #66ff66; font-size: 15px; font-weight: bold;")
         else:
             self._verdict.setText(
                 f"❌ 回答错误 · 你选{self.CHOICE_TEXT[user]}，"
-                f"标准动作:{self.CHOICE_TEXT[correct]}")
+                f"{actual}，应选{self.CHOICE_TEXT[correct]}")
             self._verdict.setStyleSheet(
                 "color: #ff6666; font-size: 15px; font-weight: bold;")
 
         if stats and stats.get("sample_n"):
             detail = (
-                f"历史统计(样本{stats['sample_n']}): "
+                f"历史参考(样本{stats['sample_n']}): "
                 f"5日涨{stats['up5_rate']:.0%}/均{stats['avg5']:+.1f}% · "
                 f"20日涨{stats['up20_rate']:.0%}/均{stats['avg20']:+.1f}% · "
-                f"盈亏比{stats['profit_factor']}  |  "
-                f"本题实际: 20日{record['fwd20']:+.1f}%"
-                f"(期间最大+{record['max_gain20']:.1f}%/"
-                f"最大{record['max_dd20']:.1f}%)")
+                f"盈亏比{stats['profit_factor']}"
+                f"  |  判分只看本股实际走势")
         else:
-            detail = f"本题实际: 20日{record['fwd20']:+.1f}%"
+            detail = "判分只看本股实际走势"
         self._detail.setText(detail)
 
         self._question_row.hide()

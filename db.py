@@ -92,6 +92,7 @@ class Database:
                 signal_name TEXT,
                 stock_code TEXT,
                 event_date TEXT,
+                position TEXT,
                 user_choice TEXT,
                 correct_choice TEXT,
                 is_correct INTEGER DEFAULT 0,
@@ -104,6 +105,14 @@ class Database:
         try:
             self.conn.execute(
                 "ALTER TABLE sessions ADD COLUMN training_mode TEXT DEFAULT 'classic'"
+            )
+        except Exception:
+            pass
+
+        # 兼容旧数据库：添加 position 列（如果不存在）
+        try:
+            self.conn.execute(
+                "ALTER TABLE quiz_answers ADD COLUMN position TEXT"
             )
         except Exception:
             pass
@@ -378,6 +387,7 @@ class Database:
             a.get("signal_name"),
             a.get("code"),
             a.get("date"),
+            a.get("position"),
             a.get("user_choice"),
             a.get("correct_choice"),
             1 if a.get("is_correct") else 0,
@@ -386,9 +396,9 @@ class Database:
         ) for a in answers]
         self.conn.executemany(
             "INSERT INTO quiz_answers (session_id, question_no, signal_id, "
-            "signal_name, stock_code, event_date, user_choice, "
+            "signal_name, stock_code, event_date, position, user_choice, "
             "correct_choice, is_correct, fwd20, stats_json) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", rows)
         self.conn.commit()
 
     def get_quiz_stats(self) -> dict:

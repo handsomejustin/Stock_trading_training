@@ -444,10 +444,14 @@ def _build_quiz_section(quiz_answers: list) -> str:
         f"共 **{len(quiz_answers)}** 题，答对 "
         f"**{sum(1 for a in quiz_answers if a['is_correct'])}** 题。",
         "",
-        "| # | 信号 | 股票 | 信号日 | 我的作答 | 标准动作 | 结果 | 实际20日 |",
-        "|---|------|------|--------|----------|----------|------|----------|",
+        "判分标准：按该股之后 20 日的实际涨跌（买入后涨=对，"
+        "持股未卖而跌=对，横盘都对）。",
+        "",
+        "| # | 信号 | 股票 | 信号日 | 持仓 | 我的作答 | 应选 | 结果 | 实际20日 |",
+        "|---|------|------|--------|------|----------|------|------|----------|",
     ]
-    choice_text = {"buy": "买入", "hold": "观望", "sell": "清仓"}
+    choice_text = {"buy": "买入", "hold": "观望", "sell": "卖出"}
+    position_text = {"cash": "持币", "held": "持股"}
     for a in quiz_answers:
         result = "✅" if a["is_correct"] else "❌"
         fwd20 = a.get("fwd20")
@@ -455,6 +459,7 @@ def _build_quiz_section(quiz_answers: list) -> str:
         lines.append(
             f"| {a.get('question_no', '-')} | {a.get('signal_name', '-')} "
             f"| {a.get('code', '-')} | {a.get('date', '-')} "
+            f"| {position_text.get(a.get('position'), '-')} "
             f"| {choice_text.get(a.get('user_choice'), '-')} "
             f"| {choice_text.get(a.get('correct_choice'), '-')} "
             f"| {result} | {fwd_str} |")
