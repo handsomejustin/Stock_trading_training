@@ -23,7 +23,7 @@ import requests
 
 
 # 当前版本号（与 git tag 保持一致）
-__version__ = "1.2.1"
+__version__ = "1.3.1"
 
 
 @dataclass
