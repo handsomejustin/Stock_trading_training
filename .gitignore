@@ -41,3 +41,6 @@ training_history.db-wal
 # Signal quiz bank (generated at runtime, rebuildable)
 signal_bank.db*
 signal_bank_test.db*
+
+# 本地技能/Agent 配置（含服务器信息，禁止推送到公开仓库）
+.zcode/
