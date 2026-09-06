@@ -6,6 +6,7 @@
 """
 
 import sys
+import json
 import sqlite3
 from pathlib import Path
 from datetime import datetime
@@ -81,6 +82,21 @@ class Database:
                 timing_score_5d REAL,
                 timing_score_10d REAL,
                 timing_score_20d REAL
+            );
+
+            CREATE TABLE IF NOT EXISTS quiz_answers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER REFERENCES sessions(id),
+                question_no INTEGER,
+                signal_id TEXT,
+                signal_name TEXT,
+                stock_code TEXT,
+                event_date TEXT,
+                user_choice TEXT,
+                correct_choice TEXT,
+                is_correct INTEGER DEFAULT 0,
+                fwd20 REAL,
+                stats_json TEXT
             );
         """)
 
@@ -342,6 +358,72 @@ class Database:
                 max_dd = dd
 
         return max_dd
+
+    # ============================================================
+    # 答题记录（quiz 模式）
+    # ============================================================
+    def save_quiz_answers(self, session_id: int,
+                          answers: list[dict]) -> None:
+        """
+        保存一次答题会话的全部作答记录。
+
+        Args:
+            session_id: 关联的 sessions.id
+            answers: QuizPanel.answered 信号发出的记录列表
+        """
+        rows = [(
+            session_id,
+            a.get("question_no"),
+            a.get("signal_id"),
+            a.get("signal_name"),
+            a.get("code"),
+            a.get("date"),
+            a.get("user_choice"),
+            a.get("correct_choice"),
+            1 if a.get("is_correct") else 0,
+            a.get("fwd20"),
+            json.dumps(a.get("stats") or {}, ensure_ascii=False),
+        ) for a in answers]
+        self.conn.executemany(
+            "INSERT INTO quiz_answers (session_id, question_no, signal_id, "
+            "signal_name, stock_code, event_date, user_choice, "
+            "correct_choice, is_correct, fwd20, stats_json) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
+        self.conn.commit()
+
+    def get_quiz_stats(self) -> dict:
+        """
+        答题统计汇总。
+
+        Returns:
+            dict: total/correct/accuracy + per_signal 列表
+                  [{signal_name, n, correct, accuracy}]
+        """
+        row = self.conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(is_correct),0) FROM quiz_answers"
+        ).fetchone()
+        total, correct = int(row[0]), int(row[1])
+
+        per_signal = []
+        for r in self.conn.execute(
+            "SELECT signal_name, COUNT(*), COALESCE(SUM(is_correct),0) "
+            "FROM quiz_answers GROUP BY signal_name "
+            "ORDER BY COUNT(*) DESC"
+        ):
+            n = int(r[1])
+            per_signal.append({
+                "signal_name": r[0],
+                "n": n,
+                "correct": int(r[2]),
+                "accuracy": (int(r[2]) / n * 100) if n else 0.0,
+            })
+
+        return {
+            "total": total,
+            "correct": correct,
+            "accuracy": (correct / total * 100) if total else 0.0,
+            "per_signal": per_signal,
+        }
 
     # ============================================================
     # 内部计算

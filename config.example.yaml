@@ -28,6 +28,11 @@ trading:
   default_sell_ratio: 1.0
   stop_loss_pct: 0.0
   take_profit_pct: 0.0
+mode:
+  current: classic        # classic / timed / multi_tf / sector / comprehensive / quiz
+  timed_seconds: 10       # 限时模式：每根K线秒数 (3/5/10/15/30)
+  sector_peer_count: 3    # 板块联动：同板块股票数 (1-5)
+  quiz_questions: 10      # 答题模式：每次会话题数
 update:
   server_url: https://stock.maolige.com
   auto_check: true

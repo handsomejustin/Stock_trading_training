@@ -27,6 +27,7 @@ def generate_report(
     config: dict,
     output_dir: str = None,
     ai_analysis: str = None,
+    quiz_answers: list = None,
 ) -> tuple:
     """
     生成训练报告并保存为 Markdown 文件。
@@ -66,6 +67,10 @@ def generate_report(
 
     # ---- 收益总结 ----
     sections.append(_build_summary(df, trade_manager))
+
+    # ---- 答题记录（quiz 模式） ----
+    if quiz_answers:
+        sections.append(_build_quiz_section(quiz_answers))
 
     # ---- AI 复盘分析 ----
     if ai_analysis:
@@ -427,6 +432,43 @@ def _build_summary(df: pd.DataFrame, trade_manager: TradeManager) -> str:
     lines.append("")
     lines.append("---")
     lines.append(f"*报告生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
+
+    return "\n".join(lines)
+
+
+def _build_quiz_section(quiz_answers: list) -> str:
+    """生成答题模式作答记录段落。"""
+    lines = [
+        "## 答题记录",
+        "",
+        f"共 **{len(quiz_answers)}** 题，答对 "
+        f"**{sum(1 for a in quiz_answers if a['is_correct'])}** 题。",
+        "",
+        "| # | 信号 | 股票 | 信号日 | 我的作答 | 标准动作 | 结果 | 实际20日 |",
+        "|---|------|------|--------|----------|----------|------|----------|",
+    ]
+    choice_text = {"buy": "买入", "hold": "观望", "sell": "清仓"}
+    for a in quiz_answers:
+        result = "✅" if a["is_correct"] else "❌"
+        fwd20 = a.get("fwd20")
+        fwd_str = f"{fwd20:+.1f}%" if fwd20 is not None else "-"
+        lines.append(
+            f"| {a.get('question_no', '-')} | {a.get('signal_name', '-')} "
+            f"| {a.get('code', '-')} | {a.get('date', '-')} "
+            f"| {choice_text.get(a.get('user_choice'), '-')} "
+            f"| {choice_text.get(a.get('correct_choice'), '-')} "
+            f"| {result} | {fwd_str} |")
+
+    # 分信号正确率
+    by_signal = {}
+    for a in quiz_answers:
+        by_signal.setdefault(a.get("signal_name", "-"), []).append(a)
+    if len(by_signal) > 1:
+        lines.append("")
+        lines.append("**分信号正确率**:")
+        for name, answers in by_signal.items():
+            correct = sum(1 for a in answers if a["is_correct"])
+            lines.append(f"- {name}: {correct}/{len(answers)}")
 
     return "\n".join(lines)
 

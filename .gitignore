@@ -37,3 +37,7 @@ training_history.db
 training_history.db-shm
 training_history.db-wal
 .build_venv/
+
+# Signal quiz bank (generated at runtime, rebuildable)
+signal_bank.db
+signal_bank_test.db

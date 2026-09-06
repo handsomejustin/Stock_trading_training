@@ -47,6 +47,8 @@ from timer_bar import TimerBar
 from multi_tf_canvas import MultiTFCanvas
 from sector_panel import SectorPanel
 from psychology_tracker import PsychologyTracker
+from signal_bank import SignalBank
+from quiz_panel import QuizPanel, QuizLoadWorker, BankBuildWorker
 
 
 # ============================================================
@@ -102,7 +104,8 @@ class LoadingOverlay(QWidget):
 class LoadWorker(QThread):
     """后台线程：执行扫描选股 + 指标计算。"""
     status = Signal(str)       # 进度文字
-    finished_ok = Signal(object, object, object, int)  # df, stock_code, hub, warmup
+    finished_ok = Signal(object, object, object, int, int)
+    # df, stock_code, hub, warmup, start_cursor
     finished_err = Signal(str)  # 错误信息
 
     def __init__(self, data_loader, days, ma_periods, config):
@@ -127,7 +130,7 @@ class LoadWorker(QThread):
             hub.calculate_all()
             warmup = hub.get_min_warmup()
 
-            self.finished_ok.emit(df, stock_code, hub, warmup)
+            self.finished_ok.emit(df, stock_code, hub, warmup, warmup)
         except Exception as e:
             self.finished_err.emit(str(e))
 
@@ -209,6 +212,11 @@ class MainWindow(QMainWindow):
         self.multi_tf_canvas: MultiTFCanvas = None
         self.sector_panel: SectorPanel = None
         self.psychology_tracker: PsychologyTracker = None
+
+        # ---- 答题模式 ----
+        self.signal_bank = SignalBank()
+        self.quiz_state = None            # {total, no, answers, current}
+        self.quiz_panel: QuizPanel = None
 
         # ---- 数据库 & AI ----
         self.db = Database()
@@ -536,8 +544,9 @@ class MainWindow(QMainWindow):
         mode_row = QHBoxLayout()
         mode_row.addWidget(QLabel("模式:"))
         self.combo_mode = QComboBox()
-        self.combo_mode.addItems(["经典模式", "限时模式", "多周期模式", "板块联动", "综合训练"])
-        _mode_keys = ["classic", "timed", "multi_tf", "sector", "comprehensive"]
+        self.combo_mode.addItems(
+            ["经典模式", "限时模式", "多周期模式", "板块联动", "综合训练", "答题模式"])
+        _mode_keys = ["classic", "timed", "multi_tf", "sector", "comprehensive", "quiz"]
         _mode_val = self.config.get("mode", {}).get("current", "classic")
         if _mode_val in _mode_keys:
             self.combo_mode.setCurrentIndex(_mode_keys.index(_mode_val))
@@ -950,6 +959,7 @@ class MainWindow(QMainWindow):
         self.weekly_cursor = 0
         self.sector_peers = []
         self.sector_cursors = {}
+        self.quiz_state = None
         self._clear_mode_widgets()
         days = self.spin_days.value()
 
@@ -958,6 +968,11 @@ class MainWindow(QMainWindow):
 
         ma_periods = self._parse_ma_periods()
         self.config["ma_periods"] = ma_periods
+
+        # 答题模式走独立流程（题库检查 → 逐题加载）
+        if self.current_mode == "quiz":
+            self._quiz_start_session()
+            return
 
         # 显示遮罩
         self._loading_overlay = LoadingOverlay(self.centralWidget())
@@ -979,15 +994,20 @@ class MainWindow(QMainWindow):
         if self._loading_overlay:
             self._loading_overlay.set_text(text)
 
-    def _on_load_done(self, df, stock_code, hub, warmup):
-        """后台加载完成回调。"""
+    def _on_load_done(self, df, stock_code, hub, warmup,
+                      start_cursor: int = None, quiz_event: dict = None):
+        """后台加载完成回调。
+
+        start_cursor: 初始可见K线位置（答题模式定位到信号日；普通模式=warmup）
+        quiz_event: 答题模式当前题目（来自 SignalBank.draw_question）
+        """
         self._hide_loading()
 
         self.df = df
         self.stock_code = stock_code
         self.indicator_hub = hub
         self.min_warmup = warmup
-        self.cursor = warmup
+        self.cursor = start_cursor if start_cursor is not None else warmup
 
         self.log(f"✅ 选中: {stock_code}, 数据量: {len(df)} 根K线")
         self.log("📈 指标计算完成")
@@ -1001,7 +1021,10 @@ class MainWindow(QMainWindow):
         self.chart.render(self.cursor, sub_inds, overlays)
 
         self.training_active = True
-        self.log(f"🎮 训练开始! 当前可见 {self.cursor}/{len(self.df)} 根K线")
+        if self.current_mode == "quiz":
+            self.log(f"🎯 答题开始! 当前可见 {self.cursor}/{len(self.df)} 根K线")
+        else:
+            self.log(f"🎮 训练开始! 当前可见 {self.cursor}/{len(self.df)} 根K线")
 
         # ---- 模式初始化 ----
         try:
@@ -1016,9 +1039,20 @@ class MainWindow(QMainWindow):
 
         self._setup_mode_widgets()
 
-        self.statusBar().showMessage(
-            f"训练中 | {self.stock_code} | 进度: {self.cursor}/{len(self.df)} | 仓位: 0%"
-        )
+        if self.current_mode == "quiz":
+            state_label = "答题中" if quiz_event is None else "出题"
+            self.statusBar().showMessage(
+                f"{state_label} | {self.stock_code} | "
+                f"进度: {self.cursor}/{len(self.df)}")
+        else:
+            self.statusBar().showMessage(
+                f"训练中 | {self.stock_code} | 进度: {self.cursor}/{len(self.df)} | 仓位: 0%"
+            )
+
+        # ---- 答题模式：展示题目 ----
+        if quiz_event is not None and self.quiz_panel is not None:
+            self.quiz_panel.begin_question(
+                self.quiz_state["no"], self.quiz_state["total"], quiz_event)
 
     def _on_load_error(self, err_msg: str):
         """后台加载失败回调。"""
@@ -1033,6 +1067,96 @@ class MainWindow(QMainWindow):
             self._loading_overlay.hide()
             self._loading_overlay.deleteLater()
             self._loading_overlay = None
+
+    # ============================================================
+    # 答题模式
+    # ============================================================
+    def _quiz_start_session(self):
+        """开始答题会话：检查题库 → 初始化状态 → 出第一题。"""
+        if not self.signal_bank.is_built():
+            ret = QMessageBox.question(
+                self, "构建题库",
+                "首次使用答题模式需要构建题库（扫描全市场历史数据，"
+                "约 3-5 分钟，之后可重复使用）。\n\n现在构建吗？")
+            if ret != QMessageBox.Yes:
+                return
+            self._quiz_build_bank()
+            return
+
+        total = int(self.config.get("mode", {}).get("quiz_questions", 10))
+        self.quiz_state = {"total": total, "no": 0, "answers": []}
+        self.log(f"🎯 答题模式开始，共 {total} 题。按 1/2/3 作答，回车下一题。")
+        self._quiz_load_question()
+
+    def _quiz_build_bank(self):
+        """后台构建题库，带进度遮罩。"""
+        self._loading_overlay = LoadingOverlay(self.centralWidget())
+        self._loading_overlay.set_text("准备构建题库")
+        self._loading_overlay.show()
+        self._loading_overlay.raise_()
+
+        self._bank_worker = BankBuildWorker(self.data_loader, self.signal_bank)
+        self._bank_worker.progress.connect(self._on_bank_progress)
+        self._bank_worker.built.connect(self._on_bank_built)
+        self._bank_worker.failed.connect(self._on_bank_failed)
+        self._bank_worker.start()
+
+    def _on_bank_progress(self, text: str):
+        if self._loading_overlay:
+            self._loading_overlay.set_text(text)
+        self.log(f"⏳ {text}")
+
+    def _on_bank_built(self, count: int):
+        self._hide_loading()
+        self.log(f"✅ 题库构建完成，共 {count} 道题")
+        self._quiz_start_session()
+
+    def _on_bank_failed(self, err_msg: str):
+        self._hide_loading()
+        self.log(f"❌ 题库构建失败: {err_msg}")
+        QMessageBox.critical(self, "题库构建失败", err_msg)
+
+    def _quiz_load_question(self):
+        """从题库抽题并后台加载对应股票数据。"""
+        event = self.signal_bank.draw_question()
+        if event is None:
+            QMessageBox.warning(
+                self, "题库为空",
+                "题库中没有题目。请通过菜单或重新进入答题模式构建题库。")
+            return
+
+        self.quiz_state["no"] += 1
+        ma_periods = self.config.get("ma_periods", [5, 10, 20, 30, 60, 120])
+
+        self._loading_overlay = LoadingOverlay(self.centralWidget())
+        self._loading_overlay.set_text(
+            f"加载第 {self.quiz_state['no']}/{self.quiz_state['total']} 题")
+        self._loading_overlay.show()
+        self._loading_overlay.raise_()
+
+        self._quiz_worker = QuizLoadWorker(
+            self.data_loader, ma_periods, self.config, event)
+        self._quiz_worker.finished_ok.connect(self._on_quiz_load_done)
+        self._quiz_worker.finished_err.connect(self._on_load_error)
+        self._quiz_worker.start()
+
+    def _on_quiz_load_done(self, df, stock_code, hub, warmup,
+                           start_cursor, event):
+        """题目数据加载完成 → 复用统一加载回调展示题目。"""
+        self._on_load_done(df, stock_code, hub, warmup, start_cursor, event)
+
+    def _on_quiz_answered(self, record: dict):
+        """收集作答记录，结束时统一入库。"""
+        self.quiz_state["answers"].append(record)
+
+    def _quiz_next(self):
+        """揭晓后进入下一题或结束会话。"""
+        if not self.quiz_state:
+            return
+        if self.quiz_state["no"] >= self.quiz_state["total"]:
+            self.end_training()
+        else:
+            self._quiz_load_question()
 
     def next_day(self):
         """推演下一天（→键）。"""
@@ -1054,6 +1178,8 @@ class MainWindow(QMainWindow):
             )
             self._update_mode_on_advance()
             if self.cursor >= len(self.df):
+                if self.current_mode == "quiz":
+                    return   # 答题模式：20根播放完毕由揭晓面板控制节奏
                 self.log("🏁 已到达最后一根K线")
                 self.end_training()
 
@@ -1167,6 +1293,11 @@ class MainWindow(QMainWindow):
         summary = self.trade_manager.summary(last_price)
         self.log(summary)
 
+        # 答题模式：收集作答记录
+        quiz_answers = None
+        if self.current_mode == "quiz" and self.quiz_state:
+            quiz_answers = self.quiz_state["answers"]
+
         # 生成报告
         report_path = ""
         report_text = ""
@@ -1178,6 +1309,7 @@ class MainWindow(QMainWindow):
                 trade_manager=self.trade_manager,
                 cursor=self.cursor,
                 config=self.config,
+                quiz_answers=quiz_answers,
             )
             self.log(f"📄 训练报告已保存: {report_path}")
         except Exception as e:
@@ -1192,6 +1324,18 @@ class MainWindow(QMainWindow):
             self.log(f"💾 训练记录已保存 (ID: {session_id})")
         except Exception as e:
             self.log(f"❌ 数据库保存失败: {e}")
+            session_id = None
+
+        # 答题记录入库
+        if quiz_answers and session_id is not None:
+            try:
+                self.db.save_quiz_answers(session_id, quiz_answers)
+                n = len(quiz_answers)
+                correct = sum(1 for a in quiz_answers if a["is_correct"])
+                pct = (correct / n * 100) if n else 0.0
+                self.log(f"📝 答题结果: {correct}/{n} 正确 ({pct:.0f}%)，已入库")
+            except Exception as e:
+                self.log(f"❌ 答题记录保存失败: {e}")
 
         # AI 分析 — 保存最新配置后提示用户手动触发
         self._save_ai_config()
@@ -1503,7 +1647,7 @@ class MainWindow(QMainWindow):
     # ============================================================
     def _on_mode_changed(self, index: int):
         """训练模式切换回调。"""
-        modes = ["classic", "timed", "multi_tf", "sector", "comprehensive"]
+        modes = ["classic", "timed", "multi_tf", "sector", "comprehensive", "quiz"]
         if index < 0 or index >= len(modes):
             return
         self.current_mode = modes[index]
@@ -1577,11 +1721,26 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.log(f"⚠ 心理追踪组件初始化失败: {e}")
 
+        try:
+            if mode == "quiz":
+                total = self.quiz_state["total"] if self.quiz_state else 10
+                self.quiz_panel = QuizPanel(
+                    parent=self, advance_cb=self.next_day, reveal_bars=20)
+                self.quiz_panel.setFocusPolicy(Qt.NoFocus)
+                self.left_chart_layout.addWidget(self.quiz_panel)
+                self._mode_widgets.append(self.quiz_panel)
+                self.quiz_panel.answered.connect(self._on_quiz_answered)
+                self.quiz_panel.next_requested.connect(self._quiz_next)
+        except Exception as e:
+            self.log(f"⚠ 答题组件初始化失败: {e}")
+
     def _clear_mode_widgets(self):
         """移除所有模式辅助组件。"""
         if self.timer_bar:
             self.timer_bar.stop()
         for widget in self._mode_widgets:
+            if hasattr(widget, "stop"):
+                widget.stop()
             self.left_chart_layout.removeWidget(widget)
             widget.hide()
             widget.deleteLater()
@@ -1590,6 +1749,7 @@ class MainWindow(QMainWindow):
         self.multi_tf_canvas = None
         self.sector_panel = None
         self.psychology_tracker = None
+        self.quiz_panel = None
 
     def _update_mode_on_advance(self):
         """K 线前进后更新所有模式组件。"""
@@ -1685,6 +1845,25 @@ class MainWindow(QMainWindow):
         if key in _SHIFT_NUM_MAP:
             key, _ = _SHIFT_NUM_MAP[key]
             modifiers |= Qt.ShiftModifier
+
+        # 答题模式：1/2/3 作答，回车下一题，Esc 结束；屏蔽交易与推进键
+        if (self.current_mode == "quiz" and self.training_active
+                and self.quiz_panel is not None):
+            if key == Qt.Key_Escape:
+                self.end_training()
+                return True
+            if key in (Qt.Key_Return, Qt.Key_Enter):
+                self.quiz_panel.try_next()
+                return True
+            if key in (Qt.Key_1, Qt.Key_2, Qt.Key_3) and not (
+                    modifiers & Qt.ShiftModifier):
+                self.quiz_panel.answer_from_key(
+                    (Qt.Key_1, Qt.Key_2, Qt.Key_3).index(key))
+                return True
+            if key in (Qt.Key_Right, Qt.Key_Left, Qt.Key_PageDown,
+                       Qt.Key_Space, Qt.Key_Up, Qt.Key_Down, Qt.Key_4):
+                return True    # 答题阶段屏蔽，防止误触交易/推进
+            return False
 
         # 方向/翻页
         if key == Qt.Key_Right:

@@ -40,9 +40,10 @@ _DEFAULT_CONFIG = {
         "skip_version": "",                          # 跳过的版本号
     },
     "mode": {
-        "current": "classic",         # classic / timed / multi_tf / sector / comprehensive
+        "current": "classic",         # classic / timed / multi_tf / sector / comprehensive / quiz
         "timed_seconds": 10,          # 限时模式：每根K线秒数 (3/5/10/15/30)
         "sector_peer_count": 3,       # 板块联动：同板块股票数 (1-5)
+        "quiz_questions": 10,         # 答题模式：每次会话题数
     },
     "indicators": {
         "MACD": {"SHORT": 12, "LONG": 26, "M": 9},

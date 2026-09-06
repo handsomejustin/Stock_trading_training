@@ -103,6 +103,20 @@ class StatsPanel(QWidget):
         self._weak_text.setWordWrap(True)
         layout.addWidget(self._weak_text)
 
+        # ---- 分信号答题正确率 ----
+        self._quiz_label = QLabel("🎯 分信号答题正确率")
+        self._quiz_label.setStyleSheet(
+            "font-size: 16px; font-weight: bold; color: #cccccc;")
+        layout.addWidget(self._quiz_label)
+
+        self._quiz_text = QLabel("暂无数据")
+        self._quiz_text.setStyleSheet(
+            "color: #aaaaaa; font-size: 14px; padding: 8px; "
+            "background-color: #2b2b2b; border-radius: 4px;"
+        )
+        self._quiz_text.setWordWrap(True)
+        layout.addWidget(self._quiz_text)
+
         layout.addStretch()
         scroll.setWidget(container)
 
@@ -130,6 +144,7 @@ class StatsPanel(QWidget):
             ("avg_return", "平均收益", "0.00%"),
             ("win_rate", "胜率", "0.0%"),
             ("avg_hold", "平均持仓", "0 天"),
+            ("quiz_acc", "答题正确率", "—"),
         ]
 
         for i, (key, title, default) in enumerate(cards):
@@ -176,11 +191,22 @@ class StatsPanel(QWidget):
         self._card_labels["win_rate"].setText(f"{stats['win_rate']:.1f}%")
         self._card_labels["avg_hold"].setText(f"{stats['avg_hold_days']:.1f} 天")
 
+        # 答题正确率
+        quiz = self.db.get_quiz_stats()
+        if quiz["total"]:
+            self._card_labels["quiz_acc"].setText(
+                f"{quiz['accuracy']:.1f}% ({quiz['correct']}/{quiz['total']})")
+        else:
+            self._card_labels["quiz_acc"].setText("—")
+
         # 更新图表
         self._charts_canvas.draw_charts(self.db)
 
         # 更新薄弱环节
         self._update_weak_spots()
+
+        # 更新分信号答题正确率
+        self._update_quiz_breakdown(quiz)
 
     # ============================================================
     # 薄弱环节
@@ -206,6 +232,32 @@ class StatsPanel(QWidget):
             )
 
         self._weak_text.setText("\n".join(lines))
+
+    # ============================================================
+    # 分信号答题正确率
+    # ============================================================
+    def _update_quiz_breakdown(self, quiz: dict) -> None:
+        """更新分信号答题正确率文本。"""
+        if not quiz["total"]:
+            self._quiz_text.setText("暂无数据。完成一次答题模式后这里会显示分析。")
+            return
+
+        lines = [f"总体: {quiz['correct']}/{quiz['total']} "
+                 f"({quiz['accuracy']:.1f}%)", ""]
+        for s in quiz["per_signal"]:
+            mark = "⚠" if s["accuracy"] < 50 and s["n"] >= 3 else "·"
+            lines.append(
+                f"{mark} {s['signal_name']}: {s['correct']}/{s['n']} "
+                f"({s['accuracy']:.0f}%)")
+
+        low = [s for s in quiz["per_signal"]
+               if s["accuracy"] < 50 and s["n"] >= 3]
+        if low:
+            lines.append("")
+            lines.append(
+                "薄弱信号: " + "、".join(s["signal_name"] for s in low))
+
+        self._quiz_text.setText("\n".join(lines))
 
     # ============================================================
     # 样式辅助

@@ -231,6 +231,37 @@ class DataLoader:
 
         return df
 
+    def load_stock_dict(self, stock: dict) -> pd.DataFrame:
+        """
+        根据 scan_stocks() 返回的条目加载该股完整前复权日线。
+
+        Args:
+            stock: 含 path, market, code, name 的字典
+
+        Returns:
+            pd.DataFrame: 列 date/open/high/low/close/volume
+        """
+        bars = read_daily_bars(stock["path"])
+        if not bars:
+            raise ValueError(f"{stock['market']}{stock['code']} 无日线数据")
+
+        df = pd.DataFrame([{
+            "date": f"{b.year}-{b.month:02d}-{b.day:02d}",
+            "date_int": b.year * 10000 + b.month * 100 + b.day,
+            "open": float(b.open),
+            "high": float(b.high),
+            "low": float(b.low),
+            "close": float(b.close),
+            "volume": float(b.vol),
+        } for b in bars])
+
+        df = df.reset_index(drop=True)
+        df = self._apply_forward_adjust(df, stock["market"], stock["code"])
+
+        if "date_int" in df.columns:
+            df = df.drop(columns=["date_int"])
+        return df
+
     # ============================================================
     # 周线重采样
     # ============================================================
