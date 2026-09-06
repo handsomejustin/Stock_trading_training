@@ -1500,11 +1500,14 @@ class MainWindow(QMainWindow):
         self._go_home()
 
     def _show_session_summary(self, stats: dict, quiz_answers: list = None):
-        """弹出训练小结，用户选择 AI 复盘时接续触发。"""
+        """弹出训练小结，用户选择 AI 复盘时接续触发。
+
+        答题会话没有交易，stats 传 None，小结只显示答题统计。
+        """
         try:
             dlg = SessionSummaryDialog(
                 self, self.stock_code or "未知", self.current_mode,
-                stats, quiz_answers)
+                None if quiz_answers else stats, quiz_answers)
             if dlg.exec() == SessionSummaryDialog.RET_AI:
                 self._on_ai_analysis_clicked()
         except Exception as e:

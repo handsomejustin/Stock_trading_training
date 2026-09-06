@@ -25,14 +25,17 @@ class SessionSummaryDialog(QDialog):
     """
     训练结束小结弹窗。
 
-    展示本次收益、对比持有不动、（答题模式）正确率，
-    并提供 AI 复盘入口。done(2) 表示用户点击了「AI 复盘」。
+    展示训练小结并提供 AI 复盘入口。done(2) 表示用户点击了「AI 复盘」。
+
+    - 交易训练（stats 传入时）：本次收益 / 持有不动 / 择时超额 / 交易次数
+    - 答题模式（quiz_answers 传入时）：只展示答题正确率与分信号统计，
+      不显示任何交易指标（答题会话没有交易）
     """
 
     RET_AI = 2
 
     def __init__(self, parent, stock_code: str, mode: str,
-                 stats: dict, quiz_answers: list = None):
+                 stats: dict = None, quiz_answers: list = None):
         super().__init__(parent)
         self.setWindowTitle("训练小结")
         self.setMinimumWidth(420)
@@ -40,53 +43,10 @@ class SessionSummaryDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
 
-        title = QLabel(f"📌 {stock_code} · {mode_name(mode)}")
-        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #ffffff;")
-        layout.addWidget(title)
-
-        def _stat_row(label: str, value_text: str, color: str) -> QWidget:
-            row = QWidget()
-            h = QHBoxLayout(row)
-            h.setContentsMargins(0, 0, 0, 0)
-            lab = QLabel(label)
-            lab.setStyleSheet("color: #aaaaaa; font-size: 15px;")
-            val = QLabel(value_text)
-            val.setStyleSheet(f"color: {color}; font-size: 17px; font-weight: bold;")
-            h.addWidget(lab)
-            h.addStretch()
-            h.addWidget(val)
-            return row
-
-        sign = "+" if stats["total_return"] >= 0 else ""
-        layout.addWidget(_stat_row(
-            "本次收益（含浮动）", f"{sign}{stats['total_return']:.2f}%",
-            "#ff6666" if stats["total_return"] >= 0 else "#66ff66"))
-
-        sign = "+" if stats["buy_hold"] >= 0 else ""
-        layout.addWidget(_stat_row(
-            "持有不动", f"{sign}{stats['buy_hold']:.2f}%",
-            "#ff6666" if stats["buy_hold"] >= 0 else "#66ff66"))
-
-        excess = stats["total_return"] - stats["buy_hold"]
-        sign = "+" if excess >= 0 else ""
-        layout.addWidget(_stat_row(
-            "择时超额", f"{sign}{excess:.2f}%",
-            "#ff6666" if excess >= 0 else "#66ff66"))
-
-        layout.addWidget(_stat_row(
-            "交易次数", f"{stats['trade_count']} 次", "#cccccc"))
-
         if quiz_answers:
-            n = len(quiz_answers)
-            correct = sum(1 for a in quiz_answers if a["is_correct"])
-            layout.addWidget(_stat_row(
-                "答题正确率", f"{correct}/{n} ({correct / n * 100:.0f}%)"
-                if n else "—", "#4a9eff"))
-
-        hint = QLabel("正的择时超额说明你的买卖点跑赢了「拿住不动」。")
-        hint.setStyleSheet("color: #888888; font-size: 13px;")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
+            self._build_quiz_body(layout, quiz_answers)
+        else:
+            self._build_trading_body(layout, stock_code, mode, stats)
 
         btn_row = QHBoxLayout()
         btn_ai = QPushButton("🤖 AI 复盘")
@@ -113,6 +73,84 @@ class SessionSummaryDialog(QDialog):
         btn_row.addWidget(btn_ai)
         btn_row.addWidget(btn_close)
         layout.addLayout(btn_row)
+
+    def _stat_row(self, label: str, value_text: str, color: str) -> QWidget:
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        lab = QLabel(label)
+        lab.setStyleSheet("color: #aaaaaa; font-size: 15px;")
+        val = QLabel(value_text)
+        val.setStyleSheet(f"color: {color}; font-size: 17px; font-weight: bold;")
+        h.addWidget(lab)
+        h.addStretch()
+        h.addWidget(val)
+        return row
+
+    def _build_trading_body(self, layout: QVBoxLayout, stock_code: str,
+                            mode: str, stats: dict) -> None:
+        """交易训练小结：收益与择时对比。"""
+        title = QLabel(f"📌 {stock_code} · {mode_name(mode)}")
+        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #ffffff;")
+        layout.addWidget(title)
+
+        sign = "+" if stats["total_return"] >= 0 else ""
+        layout.addWidget(self._stat_row(
+            "本次收益（含浮动）", f"{sign}{stats['total_return']:.2f}%",
+            "#ff6666" if stats["total_return"] >= 0 else "#66ff66"))
+
+        sign = "+" if stats["buy_hold"] >= 0 else ""
+        layout.addWidget(self._stat_row(
+            "持有不动", f"{sign}{stats['buy_hold']:.2f}%",
+            "#ff6666" if stats["buy_hold"] >= 0 else "#66ff66"))
+
+        excess = stats["total_return"] - stats["buy_hold"]
+        sign = "+" if excess >= 0 else ""
+        layout.addWidget(self._stat_row(
+            "择时超额", f"{sign}{excess:.2f}%",
+            "#ff6666" if excess >= 0 else "#66ff66"))
+
+        layout.addWidget(self._stat_row(
+            "交易次数", f"{stats['trade_count']} 次", "#cccccc"))
+
+        hint = QLabel("正的择时超额说明你的买卖点跑赢了「拿住不动」。")
+        hint.setStyleSheet("color: #888888; font-size: 13px;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+    def _build_quiz_body(self, layout: QVBoxLayout,
+                         quiz_answers: list) -> None:
+        """答题模式小结：只有答题统计，不显示交易指标。"""
+        title = QLabel("🎯 答题模式小结")
+        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #ffffff;")
+        layout.addWidget(title)
+
+        n = len(quiz_answers)
+        correct = sum(1 for a in quiz_answers if a["is_correct"])
+        pct = (correct / n * 100) if n else 0.0
+        acc = QLabel(f"{correct}/{n}    正确率 {pct:.0f}%")
+        acc.setStyleSheet(
+            "color: #4a9eff; font-size: 24px; font-weight: bold;")
+        layout.addWidget(acc)
+
+        # 分信号正确率
+        by_signal = {}
+        for a in quiz_answers:
+            by_signal.setdefault(a.get("signal_name", "-"), []).append(a)
+        lines = [f"{name} {sum(1 for a in answers if a['is_correct'])}"
+                 f"/{len(answers)}"
+                 for name, answers in by_signal.items()]
+        if lines:
+            sig = QLabel(" · ".join(lines))
+            sig.setStyleSheet("color: #cccccc; font-size: 14px;")
+            sig.setWordWrap(True)
+            layout.addWidget(sig)
+
+        hint = QLabel("判分标准：按该股之后 20 日的实际涨跌"
+                      "（横盘两种选择都对）。")
+        hint.setStyleSheet("color: #888888; font-size: 13px;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
 
 
 

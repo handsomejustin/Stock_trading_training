@@ -116,10 +116,12 @@ stats = {"total_return": 3.21, "buy_hold": 1.10, "trade_count": 4, "win_count": 
 dlg = app_main.SessionSummaryDialog(w, "SH600000", "classic", stats)
 print("SessionSummaryDialog OK")
 
+# 答题小结：stats 传 None（答题会话无交易指标），构造成功即回归通过
 dlg2 = app_main.SessionSummaryDialog(
-    w, "QUIZ", "quiz", stats,
-    quiz_answers=[{"is_correct": True}, {"is_correct": False},
-                  {"is_correct": True}])
+    w, "QUIZ", "quiz", None,
+    quiz_answers=[{"is_correct": True, "signal_name": "MACD金叉"},
+                  {"is_correct": False, "signal_name": "RSI超买"},
+                  {"is_correct": True, "signal_name": "MACD金叉"}])
 print("SessionSummaryDialog(quiz) OK")
 
 # end_training 收尾(弹窗被 mock 掉) + 训练模式小结算径

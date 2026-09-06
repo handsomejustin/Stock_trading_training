@@ -210,6 +210,9 @@ class QuizPanel(QWidget):
     # ============================================================
     def begin_question(self, no: int, total: int, event: dict) -> None:
         """展示新题目。event 来自 SignalBank.draw_question()。"""
+        # 上一题的自动播放可能未播完，必须先停，
+        # 否则残余跳动会作用到新题的K线上
+        self._play_timer.stop()
         self._current = event
         event["question_no"] = no
         self._question_active = True
@@ -329,7 +332,8 @@ class QuizPanel(QWidget):
         self._play_timer.start()
 
     def _play_tick(self) -> None:
-        if self._played >= self._reveal_bars:
+        # 双保险：非揭晓状态下的定时器残留直接自停
+        if not self._reveal_shown or self._played >= self._reveal_bars:
             self._play_timer.stop()
             return
         self._played += 1
@@ -339,6 +343,8 @@ class QuizPanel(QWidget):
     def try_next(self) -> None:
         """回车或按钮请求下一题（仅揭晓状态有效）。"""
         if self._reveal_shown:
+            # 提前进入下一题：立即停止本题的自动播放
+            self._play_timer.stop()
             self.next_requested.emit()
 
     def stop(self) -> None:

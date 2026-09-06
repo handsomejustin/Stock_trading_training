@@ -54,8 +54,16 @@ assert records[0]["correct_choice"] == exp_choice
 assert records[0]["position"] == q["position"]
 assert panel._reveal_shown and panel._play_timer.isActive()
 panel.try_next()
-print("QuizPanel OK:", records[0]["user_choice"], records[0]["correct_choice"],
-      "correct" if records[0]["is_correct"] else "wrong")
+assert not panel._play_timer.isActive(), "点下一题后自动播放应立即停止"
+
+# bug1 回归:播放中途开始下一题,残余跳动不得作用到新题K线
+q2 = bank.draw_question()
+panel.begin_question(2, 10, q2)
+assert not panel._play_timer.isActive(), "新题开始时旧播放必须已停"
+assert panel._question_active and panel._played == 0
+panel.answer_from_key(1)
+assert len(records) == 2
+print("QuizPanel OK: 两题作答正常 | 播放中途切题无残余跳动 OK")
 
 from report_generator import _build_quiz_section
 md = _build_quiz_section(records)
